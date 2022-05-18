@@ -20,6 +20,7 @@
 #include <sys/epoll.h>
 #include <sys/random.h>
 
+
 typedef uint8_t u8;
 typedef uint16_t u16;
 typedef int32_t i32;
@@ -29,6 +30,7 @@ typedef ssize_t isize;
 
 // library debug features
 #if defined(UDBG)
+
 #   include "udbg.h" // https://github.com/phgm-d3ab/udbg
 
 //#   include <stdio.h>
@@ -651,7 +653,6 @@ static u32 local_send(const i32 soc, const local_event *event)
 }
 
 
-
 /*
  *  nmp source/
  *  ├─ general definitions/
@@ -751,7 +752,7 @@ struct nmp_data
     u8 retries[6];
 
     void *rx_context;
-    void *(*auth_cb)(const u8 *, u32, void *);
+    void *(*auth_cb)(const u8 *, const struct sockaddr *, u32, void *);
     void (*data_cb)(const u8 *, u32, void *);
     void (*data_noack_cb)(const u8 *, u32, void *);
     void (*ack_cb)(u64, void *);
@@ -2610,7 +2611,7 @@ static i32 event_net_initiator(main_context nmp, const u32 id, const addr_intern
     }
 
     // ask application to allow this session
-    void *context_ptr = nmp->auth_cb(request.remote_static,
+    void *context_ptr = nmp->auth_cb(request.remote_static, &addr->generic,
                                      request.id, nmp->rx_context);
     if (context_ptr == NULL)
     {
@@ -2718,7 +2719,7 @@ static i32 event_net_read(main_context nmp,
 {
     nmp_header header = nmp->net_header;
 
-    // 0b11111111_11111100
+    // 0b11111100
     if (header.type & 0xfc)
     {
         log_info("rejecting header.type");
@@ -3059,7 +3060,7 @@ struct nmp_data *nmp_new(const nmp_conf_t *conf)
         return NULL;
     }
 
-    const sa_family_t sa_family = conf->addr.sa.sa_family ? conf->addr.sa.sa_family : AF_INET;
+    const sa_family_t sa_family = conf->addr.sa.sa_family ? : AF_INET;
     if (sa_family != AF_INET && sa_family != AF_INET6)
     {
         log_error("sa_family");
@@ -3073,8 +3074,7 @@ struct nmp_data *nmp_new(const nmp_conf_t *conf)
         return NULL;
     }
 
-    const u16 ka = conf->keepalive_interval ?
-                   conf->keepalive_interval : SESSION_TIMER_KEEPALIVE;
+    const u16 ka = conf->keepalive_interval ? : SESSION_TIMER_KEEPALIVE;
 
     // if selected value is greater than default inactivity timeout, perform
     // 3 retries; otherwise perform enough retries to reach timeout naturally
@@ -3173,7 +3173,7 @@ struct nmp_data *nmp_new(const nmp_conf_t *conf)
     tmp->retries[SESSION_STATUS_ESTAB] = ka_max;
     tmp->retries[SESSION_STATUS_ACKWAIT] = SESSION_TIMER_RETRIES_MAX;
 
-    tmp->payload = conf->payload ? conf->payload : NMP_PAYLOAD_MAX;
+    tmp->payload = conf->payload ? : NMP_PAYLOAD_MAX;
     tmp->payload += sizeof(msg_header); // we store 'real' payload limit
 
     tmp->rx_context = conf->auth_ctx;
@@ -3221,19 +3221,11 @@ struct nmp_data *nmp_new(const nmp_conf_t *conf)
 u32 nmp_connect(main_context nmp,
                 const u8 pub[NMP_KEYLEN],
                 const struct sockaddr *addr,
-                const socklen_t socklen,
                 void *ctx)
 {
-    if (!pub || !addr || !socklen)
+    if (!pub || !addr)
     {
         log_error("invalid args");
-        return 0;
-    }
-
-    if (socklen != sizeof(struct sockaddr_in)
-        && socklen != sizeof(struct sockaddr_in6))
-    {
-        log_error("socklen");
         return 0;
     }
 
@@ -3258,8 +3250,10 @@ u32 nmp_connect(main_context nmp,
 
     ctx_new->context_ptr = ctx;
     ctx_new->session_id = id;
-    mem_copy(&ctx_new->addr.generic, addr, socklen);
     mem_copy(ctx_new->remote_static, pub, NMP_KEYLEN);
+    mem_copy(&ctx_new->addr.generic, addr, nmp->sa_family == AF_INET ?
+                                           sizeof(struct sockaddr_in) :
+                                           sizeof(struct sockaddr_in6));
 
     const local_event local_msg =
             {

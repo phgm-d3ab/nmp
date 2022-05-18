@@ -4,6 +4,7 @@
 // sockaddr
 #include <arpa/inet.h>
 
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -71,11 +72,12 @@ typedef struct
     // can have its context for processing connection requests
     void *auth_ctx;
 
-    // initiator packet has been received, remote public
-    // key and would-be session id is provided; application
-    // should return NULL to deny or pointer to session
-    // context to accept this connection
+    // initiator packet has been received: remote public
+    // key, remote network address and would-be session id
+    // is provided; application should return NULL to deny
+    // or pointer to session context to accept this connection
     void *(*auth_cb)(const uint8_t *pubkey,
+                     const struct sockaddr *,
                      uint32_t session,
                      void *auth_ctx);
 
@@ -134,11 +136,14 @@ uint32_t nmp_run(nmp_t *, int32_t timeout);
 /*
  *  connect to some host using public key and address
  *  this will trigger a notification to show the result
+ *  note: length of buffer pointed to by address argument
+ *  is assumed sufficient to hold an address of a
+ *  family specified in sa_family member
+ *
  *  returns zero on success
  */
 uint32_t nmp_connect(nmp_t *, const uint8_t pub[NMP_KEYLEN],
-                     const struct sockaddr *, socklen_t,
-                     void *ctx);
+                     const struct sockaddr *, void *ctx);
 
 
 /*
