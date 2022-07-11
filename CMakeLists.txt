@@ -26,14 +26,9 @@ install(TARGETS ${PROJECT_NAME})
 
 if (CMAKE_BUILD_TYPE MATCHES Debug)
 
+    target_compile_definitions(nmp PRIVATE NMP_DEBUG)
     # strerrorname_np()
     target_compile_definitions(${PROJECT_NAME} PRIVATE _GNU_SOURCE)
-
-    target_link_libraries(nmp udbg)
-    target_compile_definitions(nmp PUBLIC
-            NMP_LOG_ERRORS=0x1
-            NMP_LOG_INFO=0x2
-            NMP_LOG_VERBOSE=0x4)
 
     # disable transport layer encryption
     #target_compile_definitions(nmp PRIVATE NMP_DEBUG_AEAD)

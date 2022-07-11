@@ -14,6 +14,7 @@
 #include <unistd.h>
 #include <time.h>
 #include <arpa/inet.h>
+#include <assert.h>
 
 #include <sys/socket.h>
 #include <sys/timerfd.h>
@@ -29,24 +30,18 @@ typedef uint64_t u64;
 typedef ssize_t isize;
 
 // library debug features
-#if defined(UDBG)
+#if defined(NMP_DEBUG)
 
-#   include "udbg.h" // https://github.com/phgm-d3ab/udbg
+#   include <stdio.h>
 
-//#   include <stdio.h>
-//
-//#   define log_error(fmt_, ...)    printf(fmt_ "\n", ##__VA_ARGS__)
-//#   define log_info(fmt_, ...)     printf(fmt_ "\n", ##__VA_ARGS__)
-//#   define log_verbose(fmt_, ...)  printf(fmt_ "\n", ##__VA_ARGS__)
+#   define __nmp_log(prefix_, fmt_, ...) \
+        dprintf(STDERR_FILENO, "[nmp]" prefix_ "[%s():%u] " fmt_ "\n", \
+        __FUNCTION__, __LINE__, ##__VA_ARGS__)
 
-#   define log_error(fmt_, ...)    udbg_log(NMP_LOG_ERRORS, fmt_, ##__VA_ARGS__)
-#   define log_info(fmt_, ...)     udbg_log(NMP_LOG_INFO, fmt_, ##__VA_ARGS__)
-#   define log_verbose(fmt_, ...)  udbg_log(NMP_LOG_VERBOSE, fmt_, ##__VA_ARGS__)
+#   define log_error(fmt_, ...)    __nmp_log("[error]", fmt_, ##__VA_ARGS__)
+#   define log_info(fmt_, ...)     __nmp_log("[info]", fmt_, ##__VA_ARGS__)
+#   define log_verbose(fmt_, ...)  __nmp_log("[verbose]", fmt_, ##__VA_ARGS__)
 #   define log_errno()             log_error("%s", strerrordesc_np(errno))
-
-#   define assert(expr_)           udbg_assert(expr_)
-#   define static_assert(...)      _Static_assert(__VA_ARGS__)
-
 
 static const char *nmp_types[] =
         {
@@ -61,16 +56,14 @@ static const char *nmp_types[] =
 #   define static
 #   define inline
 
-#else // NMP_UDBG
-
-#   include <assert.h>
+#else // NMP_DEBUG
 
 #   define log_error(fmt_, ...)
 #   define log_info(fmt_, ...)
 #   define log_verbose(fmt_, ...)
 #   define log_errno()
 
-#endif // NMP_UDBG
+#endif // NMP_DEBUG
 
 
 // http://man7.org/linux/man-pages/man2/epoll_create.2.html#NOTES
@@ -3474,9 +3467,7 @@ u32 nmp_run(main_context nmp, const i32 timeout)
 
                     case 1: // termination request
                     {
-//                        store_wipe(&nmp->sessions, (void *) session_destroy);
                         nmp_destroy(nmp);
-
                         return 0;
                     }
 
