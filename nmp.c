@@ -34,14 +34,28 @@ typedef ssize_t isize;
 
 #   include <stdio.h>
 
-#   define __nmp_log(prefix_, fmt_, ...) \
-        dprintf(STDERR_FILENO, "[nmp]" prefix_ "[%s():%u] " fmt_ "\n", \
-        __FUNCTION__, __LINE__, ##__VA_ARGS__)
 
-#   define log_error(fmt_, ...)    __nmp_log("[error]", fmt_, ##__VA_ARGS__)
-#   define log_info(fmt_, ...)     __nmp_log("[info]", fmt_, ##__VA_ARGS__)
-#   define log_verbose(fmt_, ...)  __nmp_log("[verbose]", fmt_, ##__VA_ARGS__)
-#   define log_errno()             log_error("%s", strerrordesc_np(errno))
+static void __log_timestamp(char *output)
+{
+    struct timespec ts = {0};
+    struct tm tm = {0};
+    char buf[16] = {0};
+
+    clock_gettime(CLOCK_REALTIME, &ts);
+    localtime_r(&ts.tv_sec, &tm);
+    strftime(buf, 16, "%H:%M:%S", &tm);
+    snprintf(output, 64, "%s.%09ld", buf, ts.tv_nsec);
+}
+
+#   define __log(fmt__, ...) \
+        {   char timestr__[32] = {0};                                           \
+            __log_timestamp(timestr__);                                         \
+            dprintf(STDERR_FILENO, "[%s][nmp][%s():%u] " fmt__ "\n", timestr__, \
+                __FUNCTION__, __LINE__, ##__VA_ARGS__); } while(0)              \
+
+
+#   define log(fmt_, ...)  __log(fmt_, ##__VA_ARGS__)
+#   define log_errno()      log("%s", strerrordesc_np(errno))
 
 static const char *nmp_types[] =
         {
@@ -58,9 +72,7 @@ static const char *nmp_types[] =
 
 #else // NMP_DEBUG
 
-#   define log_error(fmt_, ...)
-#   define log_info(fmt_, ...)
-#   define log_verbose(fmt_, ...)
+#   define log(...)
 #   define log_errno()
 
 #endif // NMP_DEBUG
@@ -126,7 +138,7 @@ static inline u32 timerfd_interval(const i32 timer, const u32 interval)
         return 1;
     }
 
-    log_verbose("tfd %u %u s", timer, interval);
+    log("tfd %u %u s", timer, interval);
     return 0;
 }
 
@@ -204,7 +216,7 @@ static inline u32 network_send(const i32 soc,
                               &addr->generic,
                               sizeof(addr_internal));
 
-    log_verbose("%s %zi", nmp_types[*((u8 *) data)], sent);
+    log("%s %zi", nmp_types[*((u8 *) data)], sent);
 
     if (sent != (isize) amt)
     {
@@ -227,9 +239,9 @@ static inline u32 network_receive(const i32 soc,
                                RECVFROM_OPT,
                                &addr->generic, &addr_len);
 
-    log_verbose("%s %zi (%s)",
-                (amt > 0 && *buf < 4) ? nmp_types[*buf] : "",
-                amt, strerrorname_np(errno));
+    log("%s %zi (%s)",
+        (amt > 0 && *buf < 4) ? nmp_types[*buf] : "",
+        amt, strerrorname_np(errno));
 
     if (amt < PACKET_MIN || amt > PACKET_MAX)
     {
@@ -567,7 +579,7 @@ mem_ptr mem_alloc(mem_space *mem, const u32 len)
 
     ptr.data = mem_alloc_sys(len);
     ptr.entry = NULL;
-    log_verbose("malloc() %p", ptr.data);
+    log("malloc() %p", ptr.data);
 
     return ptr;
 }
@@ -585,7 +597,7 @@ void mem_free(mem_ptr ptr)
     if (ptr.data)
     {
         mem_free_sys(ptr.data);
-        log_verbose("free() %p", ptr.data);
+        log("free() %p", ptr.data);
     }
 }
 
@@ -798,7 +810,7 @@ struct nmp_data
 
 
 #define callback(call_, ...) ({ if (call_) { call_(__VA_ARGS__); } \
-                            else { log_info("skipping empty %s", #call_); }})
+                            else { log("skipping empty %s", #call_); }})
 
 /*
  *
@@ -990,7 +1002,7 @@ static inline void tx_include(const msg_tx *tx, msg_header *msg)
     msg->len = tx->len;
 
     mem_copy(msg->data, tx->msg.data, tx->len);
-    log_verbose("seq %u status %u", msg->sequence, tx->status);
+    log("seq %u status %u", msg->sequence, tx->status);
 }
 
 
@@ -1001,7 +1013,7 @@ static void rx_copy(msg_rx *entry, const msg_header *msg)
     entry->len = msg->len;
 
     mem_copy(entry->data, msg->data, msg->len);
-    log_verbose("seq %u len %u", msg->sequence, msg->len);
+    log("seq %u len %u", msg->sequence, msg->len);
 }
 
 
@@ -1040,7 +1052,7 @@ static u32 msg_queue(session_context ctx, const mem_ptr msg, const u16 len)
 
     if (entry->status > MSG_TX_SENT)
     {
-        log_info("cannot queue new msg");
+        log("cannot queue new msg");
         return 1;
     }
 
@@ -1206,7 +1218,7 @@ static i32 msg_read(main_context nmp, session_context ctx,
         const u16 msg_maxlen = (u16) (len - iterator - sizeof(msg_header));
         if (msg_len > msg_maxlen)
         {
-            log_error("rejecting message size");
+            log("rejecting message size");
             return -1;
         }
 
@@ -1215,7 +1227,7 @@ static i32 msg_read(main_context nmp, session_context ctx,
             // mixing regular and noack messages is not allowed
             if (discovered)
             {
-                log_error("broken format");
+                log("broken format");
                 return -1;
             }
 
@@ -1234,8 +1246,8 @@ static i32 msg_read(main_context nmp, session_context ctx,
             // than latest acked (from our side) + MSG_WINDOW
             if (sequence_cmp(msg->sequence, seq_high))
             {
-                log_error("rejecting sequence %u over %u",
-                          msg->sequence, seq_high);
+                log("rejecting sequence %u over %u",
+                    msg->sequence, seq_high);
 
                 return -1;
             }
@@ -1340,8 +1352,8 @@ static i32 msg_ack_read(session_context ctx, const msg_ack *ack)
         {
             // remote peer tries to send ack for something
             // we did not send yet, cannot have this
-            log_error("rejecting ack %u (sent %u)",
-                      ack->ack, ctx->tx_sent);
+            log("rejecting ack %u (sent %u)",
+                ack->ack, ctx->tx_sent);
 
             return -1;
         }
@@ -1601,7 +1613,7 @@ static i32 crypto_packet_encrypt(session_context ctx,
 
     if (ctx->counter_send > CRYPTO_COUNTER_MAX)
     {
-        log_info("out of nonces");
+        log("out of nonces");
         return -1;
     }
 
@@ -1646,7 +1658,7 @@ static i32 counter_validate(const u32 block[4], const u64 local, const u64 remot
     {
         if (block[block_id] & (1 << (remote & 31)))
         {
-            log_info("already received [%zu]", remote);
+            log("already received [%zu]", remote);
             return -1;
         }
     }
@@ -1666,7 +1678,7 @@ static i32 crypto_packet_decrypt(session_context ctx,
     const i32 payload_len = (i32) (full_len - NMP_PROTOCOL_BYTES);
     if (payload_len < 0)
     {
-        log_error("rejecting packet size %x", header->session_id);
+        log("rejecting packet size %x", header->session_id);
         return -1;
     }
 
@@ -1674,7 +1686,7 @@ static i32 crypto_packet_decrypt(session_context ctx,
                                           ctx->counter_receive, header->counter);
     if (block_id < 0)
     {
-        log_info("counter rejected %x", header->session_id);
+        log("counter rejected %x", header->session_id);
         return -1;
     }
 
@@ -1682,7 +1694,7 @@ static i32 crypto_packet_decrypt(session_context ctx,
                             (u8 *) header, sizeof(nmp_header), header->payload,
                             payload_len, header->payload + payload_len, output))
     {
-        log_info("decryption failed %x", header->session_id);
+        log("decryption failed %x", header->session_id);
         return -1;
     }
 
@@ -1751,7 +1763,7 @@ static u32 crypto_initiator_build(main_context nmp,
 
         default:
         {
-            log_error("ctx->state");
+            log("ctx->state");
             return 1;
         }
     }
@@ -1810,7 +1822,7 @@ static i32 crypto_initiator_auth(main_context nmp,
                             (u8 *) &initiator->encrypted, sizeof(initiator->encrypted),
                             initiator->mac, (u8 *) &tmp.encrypted))
     {
-        log_info("initiator decryption failed");
+        log("initiator decryption failed");
         return 0;
     }
 
@@ -1822,7 +1834,7 @@ static i32 crypto_initiator_auth(main_context nmp,
 
     if (tai + 500 > tmp.encrypted.timestamp + NMP_INITIATOR_TTL)
     {
-        log_error("initiator expired");
+        log("initiator expired");
         return 0;
     }
 
@@ -1839,7 +1851,7 @@ static i32 crypto_initiator_auth(main_context nmp,
     crypto_hash(state1, NMP_KEYLEN, NULL, 0, local_hash);
     if (cmp256(local_hash, tmp.encrypted.hash))
     {
-        log_info("initiator verification failed");
+        log("initiator verification failed");
         return 0;
     }
 
@@ -1924,7 +1936,7 @@ static u32 crypto_responder_auth(main_context nmp,
 
         if (cmp256(local_hash, responder->hash))
         {
-            log_info("responder verification failed");
+            log("responder verification failed");
             return 1;
         }
     }
@@ -2017,7 +2029,7 @@ static u32 session_destroy(session_context ctx)
 
     msg_context_wipe(ctx);
 
-    log_info("%xu", ctx->session_id);
+    log("%xu", ctx->session_id);
     mem_zero(ctx, sizeof(struct session));
     mem_free_sys(ctx);
 
@@ -2033,7 +2045,7 @@ static void session_drop(main_context nmp,
                          session_context ctx,
                          const nmp_notification status)
 {
-    log_info("%xu", ctx->session_id);
+    log("%xu", ctx->session_id);
     callback(nmp->notif_cb, status, ctx->context_ptr);
 
     // any new network message or local requests related to this
@@ -2130,13 +2142,13 @@ static u32 session_data(main_context nmp, session_context ctx)
         {
             case 0:
             {
-                log_verbose("nothing to send");
+                log("nothing to send");
                 return 0;
             }
 
             case -1:
             {
-                log_verbose("marking full window");
+                log("marking full window");
                 ctx->state = SESSION_STATUS_WINDOW;
                 return 0;
             }
@@ -2193,7 +2205,7 @@ static u32 session_data_noack(main_context nmp, session_context ctx,
     // this context is not ready yet
     if (ctx->state < SESSION_STATUS_WINDOW)
     {
-        log_info("skipping noack");
+        log("skipping noack");
         return 0;
     }
 
@@ -2216,7 +2228,7 @@ static u32 session_ack(main_context nmp, session_context ctx)
 {
     if (ctx->response_retries > SESSION_RESPONSE_RETRY)
     {
-        log_error("maximum response retries");
+        log("maximum response retries");
         session_drop(nmp, ctx, NMP_SESSION_ERR);
         return 0;
     }
@@ -2279,14 +2291,14 @@ static i32 event_local_new(main_context nmp, const local_event *event)
 
     if (ctx_new->state)
     {
-        log_error("rejecting connection request: wrong state %u %p",
-                  ctx_new->state, ctx_new);
+        log("rejecting connection request: wrong state %u %p",
+            ctx_new->state, ctx_new);
         goto fail;
     }
 
     if (nmp->sessions.items >= NMP_SESSIONS)
     {
-        log_info("rejecting connection request: MAXCONN");
+        log("rejecting connection request: MAXCONN");
 
         session_drop(nmp, ctx_new, NMP_SESSION_MAX);
         session_destroy(ctx_new);
@@ -2326,7 +2338,7 @@ static i32 event_local(main_context nmp)
         ctx = hash_table_lookup(&nmp->sessions, event.session_id);
         if (ctx == NULL)
         {
-            log_info("dropping local request: ctx not found");
+            log("dropping local request: ctx not found");
             if (event.type == LOCAL_DATA)
             {
                 mem_free(event.message);
@@ -2367,7 +2379,7 @@ static i32 event_local(main_context nmp)
 
         default:
         {
-            log_error("unhandled event");
+            log("unhandled event");
             return -1;
         }
     }
@@ -2406,7 +2418,7 @@ static u32 event_timer(main_context nmp, session_context ctx)
     }
 
     ctx->timer_retries += 1;
-    log_verbose("state %u retry %u", ctx->state, nmp->retries[ctx->state]);
+    log("state %u retry %u", ctx->state, nmp->retries[ctx->state]);
 
     if (ctx->timer_retries >= nmp->retries[ctx->state])
     {
@@ -2532,7 +2544,7 @@ static u32 event_net_ack(main_context nmp, session_context ctx, const u32 payloa
     {
         // this ack did not fail authentication
         // but we cant read it, something is going on
-        log_error("payload != sizeof(ack)");
+        log("payload != sizeof(ack)");
 
         session_drop(nmp, ctx, NMP_SESSION_ERR);
         return 1;
@@ -2541,7 +2553,7 @@ static u32 event_net_ack(main_context nmp, session_context ctx, const u32 payloa
     // we only want WINDOW, ESTAB & ACKWAIT here
     if (ctx->state < SESSION_STATUS_WINDOW)
     {
-        log_error("rejecting new_context.state < SESSION_STATUS_ESTAB");
+        log("rejecting new_context.state < SESSION_STATUS_ESTAB");
         return 0;
     }
 
@@ -2574,13 +2586,13 @@ static i32 event_net_initiator(main_context nmp, const u32 id, const addr_intern
             }
         }
 
-        log_info("dropping initiator for %u", id);
+        log("dropping initiator for %u", id);
         return 0;
     }
 
     if (nmp->sessions.items > HASH_TABLE_SIZE)
     {
-        log_info("cannot accept new connection");
+        log("cannot accept new connection");
         return 0;
     }
 
@@ -2608,7 +2620,7 @@ static i32 event_net_initiator(main_context nmp, const u32 id, const addr_intern
                                      request.id, nmp->rx_context);
     if (context_ptr == NULL)
     {
-        log_info("rejecting: application denied new session");
+        log("rejecting: application denied new session");
         return 0;
     }
 
@@ -2646,19 +2658,19 @@ static u32 event_net_responder(main_context nmp, session_context ctx, const u32 
     if (ctx->state != SESSION_STATUS_RESPONSE)
     {
         // this also protects against duplicate responders
-        log_verbose("state != SESSION_STATUS_RESPONSE");
+        log("state != SESSION_STATUS_RESPONSE");
         return 0;
     }
 
     if (amt != sizeof(nmp_responder))
     {
-        log_info("rejecting net_buf.amt != sizeof(nmp_responder)");
+        log("rejecting net_buf.amt != sizeof(nmp_responder)");
         return 0;
     }
 
     if (crypto_responder_auth(nmp, ctx, &nmp->net_responder))
     {
-        log_info("dropping responder for %u", ctx->session_id);
+        log("dropping responder for %u", ctx->session_id);
         return 0;
     }
 
@@ -2715,19 +2727,19 @@ static i32 event_net_read(main_context nmp,
     // 0b11111100
     if (header.type & 0xfc)
     {
-        log_info("rejecting header.type");
+        log("rejecting header.type");
         return 0;
     }
 
     if (header.pad[0] | header.pad[1] | header.pad[2])
     {
-        log_info("rejecting header.pad");
+        log("rejecting header.pad");
         return 0;
     }
 
     if (header.session_id == 0)
     {
-        log_info("rejecting reserved id value");
+        log("rejecting reserved id value");
         return 0;
     }
 
@@ -2738,8 +2750,8 @@ static i32 event_net_read(main_context nmp,
             return 0;
         }
 
-        log_verbose("received initiator %x, counter %zu",
-                    header.session_id, header.counter);
+        log("received initiator %x, counter %zu",
+            header.session_id, header.counter);
 
         return event_net_initiator(nmp, header.session_id, addr);
     }
@@ -2747,20 +2759,20 @@ static i32 event_net_read(main_context nmp,
     session_context ctx = hash_table_lookup(&nmp->sessions, header.session_id);
     if (ctx == NULL)
     {
-        log_info("discarded message for %u", header.session_id);
+        log("discarded message for %u", header.session_id);
         return 0;
     }
 
     // it is important to skip any extra processing
     if (!ctx->state)
     {
-        log_info("discarding data for dead context");
+        log("discarding data for dead context");
         return 0;
     }
 
     if (mem_cmp(&ctx->addr.generic, &addr->generic, sizeof(addr_internal)) != 0)
     {
-        log_info("rejecting addr != recvfrom().addr");
+        log("rejecting addr != recvfrom().addr");
         return 0;
     }
 
@@ -2771,7 +2783,7 @@ static i32 event_net_read(main_context nmp,
     {
         if (amt % 16)
         {
-            log_info("rejecting amt %% 16");
+            log("rejecting amt %% 16");
             return 0;
         }
 
@@ -2779,20 +2791,20 @@ static i32 event_net_read(main_context nmp,
                                                   ctx->payload);
         if (payload < 0)
         {
-            log_verbose("payload < 0");
+            log("payload < 0");
 
             // it is important to not let any other processing
             *ctx_ptr = NULL;
             return 0;
         }
 
-        log_verbose("received data %x, counter %zu",
-                    header.session_id, header.counter);
+        log("received data %x, counter %zu",
+            header.session_id, header.counter);
 
         return payload;
     }
 
-    log_verbose("received responder %x", header.session_id);
+    log("received responder %x", header.session_id);
     return 1;
 }
 
@@ -2905,7 +2917,7 @@ static i32 event_net_collect(main_context nmp, session_context *queue)
 
             default:
             {
-                log_error("unknown header.type");
+                log("unknown header.type");
                 return -1;
             }
         }
@@ -3049,21 +3061,21 @@ struct nmp_data *nmp_new(const nmp_conf_t *conf)
 
     if (conf == NULL)
     {
-        log_error("conf == NULL");
+        log("conf == NULL");
         return NULL;
     }
 
     const sa_family_t sa_family = conf->addr.sa.sa_family ? : AF_INET;
     if (sa_family != AF_INET && sa_family != AF_INET6)
     {
-        log_error("sa_family");
+        log("sa_family");
         return NULL;
     }
 
     if (conf->payload &&
         (conf->payload < 524 || conf->payload > NMP_PAYLOAD_MAX))
     {
-        log_error("payload");
+        log("payload");
         return NULL;
     }
 
@@ -3192,7 +3204,7 @@ struct nmp_data *nmp_new(const nmp_conf_t *conf)
      */
     fail:
     {
-        log_error("fail %s", strerrorname_np(errno));
+        log("fail %s", strerrorname_np(errno));
 
         close(soc_fd);
         close(epoll_fd);
@@ -3218,13 +3230,13 @@ u32 nmp_connect(main_context nmp,
 {
     if (!pub || !addr)
     {
-        log_error("invalid args");
+        log("invalid args");
         return 0;
     }
 
     if (nmp->sa_family != addr->sa_family)
     {
-        log_error("sa_family");
+        log("sa_family");
         return 0;
     }
 
@@ -3275,7 +3287,7 @@ u32 nmp_send(main_context nmp, const u32 session,
 {
     if (!nmp || !session || !buf || !len)
     {
-        log_error("invalid args");
+        log("invalid args");
         return 1;
     }
 
@@ -3313,7 +3325,7 @@ u32 nmp_send_noack(main_context nmp, const u32 session,
 {
     if (!nmp || !session || !buf || !len)
     {
-        log_error("invalid args");
+        log("invalid args");
         return 1;
     }
 
@@ -3368,7 +3380,7 @@ u32 nmp_drop(main_context nmp, const u32 session)
 {
     if (session == 0)
     {
-        log_error("cannot drop session 0");
+        log("cannot drop session 0");
         return 1;
     }
 
@@ -3438,7 +3450,7 @@ u32 nmp_run(main_context nmp, const i32 timeout)
             const epoll_data_t event = epoll_queue[i].data;
             if (event.ptr == NULL)
             {
-                log_error("null event %s", strerrorname_np(errno));
+                log("null event %s", strerrorname_np(errno));
                 return 1;
             }
 
@@ -3448,7 +3460,7 @@ u32 nmp_run(main_context nmp, const i32 timeout)
             {
                 if (event_network(nmp))
                 {
-                    log_error("network error");
+                    log("network error");
                     return 1;
                 }
 
