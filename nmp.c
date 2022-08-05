@@ -44,7 +44,7 @@ static void __log_timestamp(char *output)
     clock_gettime(CLOCK_REALTIME, &ts);
     localtime_r(&ts.tv_sec, &tm);
     strftime(buf, 16, "%H:%M:%S", &tm);
-    snprintf(output, 64, "%s.%09ld", buf, ts.tv_nsec);
+    snprintf(output, 64, "%s.%06ld", buf, (ts.tv_nsec / 1000l));
 }
 
 #   define __log(fmt__, ...) \
@@ -76,6 +76,14 @@ static const char *nmp_types[] =
 #   define log_errno()
 
 #endif // NMP_DEBUG
+
+
+// cosmetics mainly
+#define mem_alloc(size_)                malloc(size_)
+#define mem_free(ptr_)                  free(ptr_)
+#define mem_zero(ptr_, len_)            memset(ptr_, 0, len_)
+#define mem_copy(dest_, src_, len_)     memcpy(dest_, src_, len_)
+#define mem_cmp(buf1_, buf2_, len_)     memcmp(buf1_, buf2_, len_)
 
 
 // http://man7.org/linux/man-pages/man2/epoll_create.2.html#NOTES
@@ -361,7 +369,7 @@ static u64 siphash(const u8 *key, const u8 *data, const u32 len)
 #define HASH_TABLE_SIZE     NMP_SESSIONS
 #define HASH_TABLE_RS       (HASH_TABLE_SIZE * 2) // real size
 #define HASH_TABLE_NF       (HASH_TABLE_SIZE + 1) // not found
-#define HASH_TABLE_CACHE    64
+#define HASH_TABLE_CACHE    (HASH_TABLE_SIZE / 8)
 
 static_assert((HASH_TABLE_SIZE & (HASH_TABLE_SIZE - 1)) == 0,
               "hash table size must be a power of two");
@@ -522,133 +530,49 @@ static void hash_table_remove(hash_table *ht, const u32 id)
 
 
 /*
- *  memory
- */
-#define mem_alloc_sys(size_)            malloc(size_)
-#define mem_free_sys(ptr_)              free(ptr_)
-#define mem_zero(ptr_, len_)            memset(ptr_, 0, len_)
-#define mem_copy(dest_, src_, len_)     memcpy(dest_, src_, len_)
-#define mem_cmp(buf1_, buf2_, len_)     memcmp(buf1_, buf2_, len_)
-
-#define MEM_DATA_BLOCK  NMP_PAYLOAD_MAX
-#define MEM_ENTRIES     4096
-
-
-typedef struct
-{
-    atomic_bool busy;
-    u8 pad[3];
-    u8 data[MEM_DATA_BLOCK];
-
-} mem_entry;
-
-typedef struct
-{
-    union
-    {
-        u8 *data;
-        void *data_ptr;
-    };
-
-    mem_entry *entry;
-
-} mem_ptr;
-
-typedef struct
-{
-    atomic_uint iterator;
-    mem_entry entry[MEM_ENTRIES];
-
-} mem_space;
-
-
-mem_ptr mem_alloc(mem_space *mem, const u32 len)
-{
-    mem->iterator += 1;
-
-    mem_ptr ptr;
-    mem_entry *entry = &mem->entry[mem->iterator & (MEM_ENTRIES - 1)];
-    if (entry->busy == 0)
-    {
-        entry->busy = 1;
-        ptr.data = entry->data;
-        ptr.entry = entry;
-
-        return ptr;
-    }
-
-    ptr.data = mem_alloc_sys(len);
-    ptr.entry = NULL;
-    log("malloc() %p", ptr.data);
-
-    return ptr;
-}
-
-
-void mem_free(mem_ptr ptr)
-{
-    if (ptr.entry)
-    {
-        assert(ptr.entry->busy);
-        ptr.entry->busy = 0;
-        return;
-    }
-
-    if (ptr.data)
-    {
-        mem_free_sys(ptr.data);
-        log("free() %p", ptr.data);
-    }
-}
-
-
-/*
  *  socket pair wrappers
  */
-#define LOCAL_TERM          1   // request for graceful exit
-#define LOCAL_NEW           2   // new connection request
-#define LOCAL_DROP          3   // drop connection request
-#define LOCAL_DATA          4   // send message request
-#define LOCAL_FLAG_NOACK    1   // noack message
+#define LOCAL_PAYLOAD_MAX   32
 
-
+// serves as a header for local messages
 typedef struct
 {
-    u8 type;
-    u8 flags;
+    u16 type;
     u16 len;
-    u32 session_id;
+    u32 id;
 
-    union
-    {
-        u64 empty;
-        struct session *new_context;
-        mem_ptr message;
-    };
+//    u8 payload[];
 
 } local_event;
 
 
-static local_event local_receive(const i32 soc)
+static isize local_receive(const i32 soc,
+                           local_event *output)
 {
-    local_event event = {0};
-
-    const isize amt = read(soc, (u8 *) &event, sizeof(local_event));
-    if (amt != sizeof(local_event))
-    {
-        const local_event err = {0};
-        log_errno();
-        return err;
-    }
-
-    return event;
+    return read(soc, output, sizeof(local_event) + LOCAL_PAYLOAD_MAX);
 }
 
 
-static u32 local_send(const i32 soc, const local_event *event)
+static u32 local_send(const i32 soc,
+                      const local_event *event,
+                      const void *payload,
+                      const u32 payload_len)
 {
-    const isize amt = write(soc, event, sizeof(local_event));
-    if (amt != sizeof(local_event))
+    struct
+    {
+        local_event ev;
+        u8 payload[LOCAL_PAYLOAD_MAX];
+
+    } buf = {0};
+
+    buf.ev = *event;
+    if (payload)
+    {
+        mem_copy(buf.payload, payload, payload_len);
+    }
+
+    const u32 amt = sizeof(local_event) + payload_len;
+    if (write(soc, &buf, amt) != amt)
     {
         log_errno();
         return 1;
@@ -776,7 +700,6 @@ struct nmp_data
     };
 
     hash_table sessions;
-    mem_space mem;
 };
 
 
@@ -815,6 +738,8 @@ struct nmp_data
 /*
  *
  */
+#define MSG_ALLOC_BLOCK 2048
+
 #define MSG_MASK_BITS   32
 #define MSG_MASK_INIT   0xffffffff
 
@@ -866,7 +791,7 @@ typedef struct
     u16 len;
     u64 id;
 
-    mem_ptr msg;
+    u8 *msg;
 
 } msg_tx;
 
@@ -1001,7 +926,7 @@ static inline void tx_include(const msg_tx *tx, msg_header *msg)
     msg->sequence = tx->seq;
     msg->len = tx->len;
 
-    mem_copy(msg->data, tx->msg.data, tx->len);
+    mem_copy(msg->data, tx->msg, tx->len);
     log("seq %u status %u", msg->sequence, tx->status);
 }
 
@@ -1042,9 +967,9 @@ static void msg_context_wipe(session_context ctx)
 /*
  *
  */
-static u32 msg_queue(session_context ctx, const mem_ptr msg, const u16 len)
+static u32 msg_queue(session_context ctx, const u8 *msg, const u16 len)
 {
-    assert(msg.data);
+    assert(msg);
 
     // pre-increment: check one ahead
     const u32 index = (ctx->tx_seq + 1) % MSG_TXQUEUE;
@@ -1060,7 +985,7 @@ static u32 msg_queue(session_context ctx, const mem_ptr msg, const u16 len)
 
     entry->status = MSG_TX_QUEUED;
     entry->seq = ctx->tx_seq;
-    entry->msg = msg;
+    entry->msg = (u8 *) msg;
     entry->len = len;
     entry->id = ctx->tx_counter;
 
@@ -1176,12 +1101,13 @@ static u32 msg_assemble_retry(session_context ctx,
 /*
  *  build a noack message in-place
  */
-i32 msg_assemble_noack(msg_header *header, const u16 len)
+u32 msg_assemble_noack(msg_header *header, const u8 *payload, const u16 len)
 {
     header->sequence = 0;
     header->len = len;
     header->len |= MSG_NOACK;
 
+    mem_copy(header->data, payload, len);
     return payload_zeropad(header->data, (i32) (len + sizeof(msg_header)));
 }
 
@@ -1974,7 +1900,7 @@ static session_context session_new(const i32 epoll_fd)
         return NULL;
     }
 
-    session_context ctx = mem_alloc_sys(sizeof(struct session));
+    session_context ctx = mem_alloc(sizeof(struct session));
     if (ctx == NULL)
     {
         log_errno();
@@ -1994,7 +1920,7 @@ static session_context session_new(const i32 epoll_fd)
             log_errno();
         }
 
-        mem_free_sys(ctx);
+        mem_free(ctx);
         return NULL;
     }
 
@@ -2031,7 +1957,7 @@ static u32 session_destroy(session_context ctx)
 
     log("%xu", ctx->session_id);
     mem_zero(ctx, sizeof(struct session));
-    mem_free_sys(ctx);
+    mem_free(ctx);
 
     return 0;
 }
@@ -2199,7 +2125,7 @@ static u32 session_data_retry(main_context nmp, session_context ctx)
  *
  */
 static u32 session_data_noack(main_context nmp, session_context ctx,
-                              mem_ptr message, const u16 len)
+                              const msg_header *message, const u16 len)
 {
     // NONE, RESPONDER, CONFIRM mean that
     // this context is not ready yet
@@ -2209,16 +2135,8 @@ static u32 session_data_noack(main_context nmp, session_context ctx,
         return 0;
     }
 
-    // remember: this call takes pointer to msg_header,
-    // which is what was set up in nmp_send_noack()
-    const i32 bytes = msg_assemble_noack(message.data_ptr, len);
-    if (session_send(nmp, ctx, message.data_ptr, bytes, NMP_DATA))
-    {
-        return 1;
-    }
-
-    mem_free(message);
-    return 0;
+    return session_send(nmp, ctx, (const u8 *) message,
+                        len, NMP_DATA);
 }
 
 /*
@@ -2255,39 +2173,88 @@ static u32 session_keepalive(main_context nmp, session_context ctx)
 ///////////////////////////////
 ///     local events        ///
 ///////////////////////////////
+#define EVENT_LOCAL_MALLOC  MSG_ALLOC_BLOCK
 
-static u32 event_local_data(main_context nmp,
-                            session_context ctx,
-                            const local_event *event)
+
+enum event_local_type
 {
-    assert(event->message.data);
+    EVENT_LOCAL_DATA = 0,
+    EVENT_LOCAL_DATA_NOACK = 1,
+    EVENT_LOCAL_DROP = 2,
+    EVENT_LOCAL_NEW = 3,
+    EVENT_LOCAL_TERM = 4,
+};
 
-    if (event->flags & LOCAL_FLAG_NOACK)
+
+typedef struct
+{
+    local_event header;
+    union
     {
-        return session_data_noack(nmp, ctx,
-                                  event->message, event->len);
-    }
+        session_context payload_ctx;
+        msg_header *payload_noack;
+        u8 *payload_data;
+        void *payload_ptr;
+        u8 bytes[LOCAL_PAYLOAD_MAX];
+    };
 
+} event_local_buf;
+
+
+static i32 event_local_data(main_context nmp,
+                            session_context ctx,
+                            const event_local_buf *event)
+{
     // try to include this message to next outgoing packet
-    if (msg_queue(ctx, event->message, event->len))
+    if (msg_queue(ctx, event->payload_data, event->header.len))
     {
         // let application know that the queue is full
         callback(nmp->notif_cb, NMP_SESSION_QUEUE, ctx->context_ptr);
-        mem_free(event->message);
+        mem_free(event->payload_ptr);
         return 0;
     }
 
-    return session_data(nmp, ctx);
+    return session_data(nmp, ctx) ? -1 : 0;
+}
+
+/*
+ *  remember: message is preformed in nmp_send_noack()
+ *  so we have a payload that is ready for sending
+ */
+static i32 event_local_noack(main_context nmp,
+                             session_context ctx,
+                             const event_local_buf *event)
+{
+    if (session_data_noack(nmp, ctx,
+                           event->payload_noack, event->header.len))
+    {
+        mem_free(event->payload_ptr);
+        return -1;
+    }
+
+    return 0;
+}
+
+static i32 event_local_drop(main_context nmp,
+                            session_context ctx,
+                            const event_local_buf *event)
+{
+    UNUSED(event);
+    session_drop(nmp, ctx, NMP_SESSION_DC);
+    return 0;
 }
 
 /*
  *  note: in case of errors it safe to delete
  *  context here immediately
  */
-static i32 event_local_new(main_context nmp, const local_event *event)
+static i32 event_local_new(main_context nmp,
+                           session_context ctx,
+                           const event_local_buf *event)
 {
-    session_context ctx_new = event->new_context;
-    const u32 id_new = event->session_id;
+    UNUSED(ctx);
+    session_context ctx_new = event->payload_ctx;
+    const u32 id_new = event->header.id;
 
     if (ctx_new->state)
     {
@@ -2327,55 +2294,57 @@ static i32 event_local_new(main_context nmp, const local_event *event)
     }
 }
 
+
+static i32 event_local_term(main_context nmp,
+                            session_context ctx,
+                            const event_local_buf *event)
+{
+    UNUSED(nmp);
+    UNUSED(ctx);
+    UNUSED(event);
+
+    // just the indicator
+    return 1;
+}
+
+
 static i32 event_local(main_context nmp)
 {
-    const local_event event = local_receive(nmp->local_rx);
     session_context ctx = NULL;
+    event_local_buf buf = {0};
 
-    // find context for LOCAL_DATA & LOCAL_DROP
-    if (event.type > LOCAL_NEW)
+    if (local_receive(nmp->local_rx, &buf.header) == -1)
     {
-        ctx = hash_table_lookup(&nmp->sessions, event.session_id);
+        log_errno();
+        return -1;
+    }
+
+    // find context for types that need it,
+    // and select appropriate action
+    const enum event_local_type type = buf.header.type;
+    if (type < EVENT_LOCAL_NEW)
+    {
+        ctx = hash_table_lookup(&nmp->sessions, buf.header.id);
         if (ctx == NULL)
         {
             log("dropping local request: ctx not found");
-            if (event.type == LOCAL_DATA)
-            {
-                mem_free(event.message);
-            }
-
+            mem_free(buf.payload_ptr);
             return 0;
         }
     }
 
-    switch (event.type)
+    switch (type)
     {
-        case LOCAL_DATA:
-        {
-            return event_local_data(nmp, ctx, &event) ? -1 : 0;
-        }
-
-        case LOCAL_NEW:
-        {
-            return event_local_new(nmp, &event);
-        }
-
-        case LOCAL_DROP:
-        {
-            // avoid use after free() => cannot delete immediately:
-            // what if next event after this is the triggered
-            // timer, which does not use sessions to lookup context
-            session_drop(nmp, ctx, NMP_SESSION_DC);
-            break;
-        }
-
-        case LOCAL_TERM:
-        {
-            // clean-up & termination is not done here
-            // so simply indicate event loop that
-            // termination has been requested
-            return 1;
-        }
+        case EVENT_LOCAL_DATA:
+            return event_local_data(nmp, ctx, &buf);
+        case EVENT_LOCAL_DATA_NOACK:
+            return event_local_noack(nmp, ctx, &buf);
+        case EVENT_LOCAL_DROP:
+            return event_local_drop(nmp, ctx, &buf);
+        case EVENT_LOCAL_NEW:
+            return event_local_new(nmp, ctx, &buf);
+        case EVENT_LOCAL_TERM:
+            return event_local_term(nmp, ctx, &buf);
 
         default:
         {
@@ -3046,7 +3015,7 @@ static void nmp_destroy(main_context nmp)
     close(nmp->local_rx);
     close(nmp->local_tx);
 
-    mem_free_sys(nmp);
+    mem_free(nmp);
     assert(errno == 0);
 }
 
@@ -3123,7 +3092,7 @@ struct nmp_data *nmp_new(const nmp_conf_t *conf)
     /*
      *
      */
-    tmp = (nmp_t *) mem_alloc_sys(sizeof(nmp_t));
+    tmp = (nmp_t *) mem_alloc(sizeof(nmp_t));
     if (tmp == NULL)
     {
         goto fail;
@@ -3213,7 +3182,7 @@ struct nmp_data *nmp_new(const nmp_conf_t *conf)
 
         if (tmp)
         {
-            mem_free_sys(tmp);
+            mem_free(tmp);
         }
 
         return NULL;
@@ -3260,16 +3229,15 @@ u32 nmp_connect(main_context nmp,
                                            sizeof(struct sockaddr_in) :
                                            sizeof(struct sockaddr_in6));
 
-    const local_event local_msg =
+    const local_event ev =
             {
-                    .type = LOCAL_NEW,
-                    .flags = 0,
+                    .type = EVENT_LOCAL_NEW,
                     .len = 0,
-                    .session_id = id,
-                    .new_context = ctx_new,
+                    .id = id,
             };
 
-    if (local_send(nmp->local_tx, &local_msg))
+    if (local_send(nmp->local_tx, &ev,
+                   &ctx_new, sizeof(struct session *)))
     {
         session_destroy(ctx_new);
         return 0;
@@ -3297,19 +3265,18 @@ u32 nmp_send(main_context nmp, const u32 session,
         return 1;
     }
 
-    mem_ptr ptr = mem_alloc(&nmp->mem, len);
-    mem_copy(ptr.data, buf, len);
+    u8 *ptr = mem_alloc(EVENT_LOCAL_MALLOC);
+    mem_copy(ptr, buf, len);
 
-    const local_event msg =
+    const local_event ev =
             {
-                    .type = LOCAL_DATA,
-                    .flags = 0,
+                    .type = EVENT_LOCAL_DATA,
                     .len = len,
-                    .session_id = session,
-                    .message = ptr,
+                    .id = session,
             };
 
-    if (local_send(nmp->local_tx, &msg))
+    if (local_send(nmp->local_tx, &ev,
+                   &ptr, sizeof(u8 *)))
     {
         mem_free(ptr);
         return 1;
@@ -3335,28 +3302,22 @@ u32 nmp_send_noack(main_context nmp, const u32 session,
         return 1;
     }
 
-    // noack messages are not buffered so lets avoid
-    // extra copying and assemble them in-place;
-    // additional size (header+16) are there in case
-    // memory allocator has to fall back to system malloc():
-    // account for extra size and padding
-    mem_ptr ptr = mem_alloc(&nmp->mem, len + sizeof(msg_header) + 16);
+    // noack messages are not buffered so let's avoid
+    // extra copying and assemble them in-place:
+    msg_header *header = mem_alloc(EVENT_LOCAL_MALLOC);
+    msg_assemble_noack(header, buf, len);
 
-    msg_header *header = ptr.data_ptr;
-    mem_copy(header->data, buf, len);
-
-    const local_event msg =
+    const local_event ev =
             {
-                    .type = LOCAL_DATA,
-                    .flags = LOCAL_FLAG_NOACK,
+                    .type = EVENT_LOCAL_DATA_NOACK,
                     .len = len,
-                    .session_id = session,
-                    .message = ptr,
+                    .id = session,
             };
 
-    if (local_send(nmp->local_tx, &msg))
+    if (local_send(nmp->local_tx, &ev,
+                   &header, sizeof(msg_header *)))
     {
-        mem_free(ptr);
+        mem_free(header);
         return 1;
     }
 
@@ -3386,14 +3347,12 @@ u32 nmp_drop(main_context nmp, const u32 session)
 
     const local_event drop =
             {
-                    .type = LOCAL_DROP,
-                    .flags = 0,
+                    .type = EVENT_LOCAL_DROP,
                     .len = 0,
-                    .session_id = session,
-                    .empty = 0,
+                    .id = session,
             };
 
-    return local_send(nmp->local_tx, &drop);
+    return local_send(nmp->local_tx, &drop, NULL, 0);
 }
 
 /*
@@ -3403,13 +3362,12 @@ u32 nmp_terminate(main_context nmp)
 {
     const local_event term =
             {
-                    .type = LOCAL_TERM,
-                    .flags = 0,
+                    .type = EVENT_LOCAL_TERM,
                     .len = 0,
-                    .empty = 0,
+                    .id = 0,
             };
 
-    return local_send(nmp->local_tx, &term);
+    return local_send(nmp->local_tx, &term, NULL, 0);
 }
 
 /*
