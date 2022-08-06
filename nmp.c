@@ -1148,7 +1148,7 @@ static i32 msg_read(main_context nmp, session_context ctx,
     for (;; discovered++)
     {
         const msg_header *msg = (const msg_header *) (payload + iterator);
-        if (len - iterator <= sizeof(msg_header))
+        if ((len - iterator) <= sizeof(msg_header))
         {
             break;
         }
@@ -1178,7 +1178,7 @@ static i32 msg_read(main_context nmp, session_context ctx,
             }
 
             callback(nmp->data_noack_cb, msg->data, msg_len, ctx->context_ptr);
-            return 0;
+            return (MSG_WINDOW + 1);
         }
 
         if (msg->len & MSG_RESERVED)
@@ -2519,6 +2519,12 @@ static i32 event_net_data(main_context nmp, session_context ctx, const u32 paylo
             return session_ack(nmp, ctx) ? -1 : 0;
         }
 
+        case (MSG_WINDOW + 1):
+        {
+            // successful noack message
+            return 0;
+        }
+
         default:
         {
             return new_messages;
@@ -3359,12 +3365,11 @@ u32 nmp_send_noack(main_context nmp, const u32 session,
     // noack messages are not buffered so let's avoid
     // extra copying and assemble them in-place:
     msg_header *header = mem_alloc(EVENT_LOCAL_MALLOC);
-    msg_assemble_noack(header, buf, len);
-
+    const u16 total_len = msg_assemble_noack(header, buf, len);
     const local_event ev =
             {
                     .type = EVENT_LOCAL_DATA_NOACK,
-                    .len = len,
+                    .len = total_len,
                     .id = session,
             };
 
