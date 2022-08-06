@@ -8,7 +8,6 @@
 #include "blake2s.h"           // https://github.com/phgm-d3ab/blake2
 
 #include <stdlib.h>
-#include <stdatomic.h>
 #include <string.h>
 #include <errno.h>
 #include <unistd.h>
@@ -2573,26 +2572,6 @@ static i32 event_net_initiator(main_context nmp, const u32 id, const addr_intern
         return 0;
     }
 
-    session_context ctx = hash_table_lookup(&nmp->sessions, id);
-    if (ctx)
-    {
-        if (ctx->state == SESSION_STATUS_CONFIRM)
-        {
-            // here we already received a valid initiator from
-            // this host, so we "trust enough" to skip verification;
-            // even if these initiators are not valid, resending up to
-            // SESSION_RESPONSE_RETRY responders doesn't do a lot of harm
-            if (ctx->response_retries < SESSION_RESPONSE_RETRY)
-            {
-                ctx->response_retries += 1;
-                return session_responder(nmp, ctx) ? -1 : 0;
-            }
-        }
-
-        log("dropping initiator for %u", id);
-        return 0;
-    }
-
     if (nmp->sessions.items > HASH_TABLE_SIZE)
     {
         log("cannot accept new connection");
@@ -2600,6 +2579,14 @@ static i32 event_net_initiator(main_context nmp, const u32 id, const addr_intern
     }
 
     crypto_initiation_request request = {0};
+    session_context ctx = hash_table_lookup(&nmp->sessions, id);
+    if (ctx && ctx->state != SESSION_STATUS_CONFIRM)
+    {
+        log("dropping initiator for %u", id);
+        return 0;
+    }
+
+
     switch (crypto_initiator_auth(nmp, &nmp->net_initiator, &request))
     {
         case 0: // invalid initiation request
@@ -2614,6 +2601,16 @@ static i32 event_net_initiator(main_context nmp, const u32 id, const addr_intern
 
         case 1: // valid initiation request
         {
+            if (ctx && ctx->response_retries < SESSION_RESPONSE_RETRY)
+            {
+                log("retrying response for %u (%u)",
+                    ctx->session_id,
+                    ctx->response_retries);
+
+                ctx->response_retries += 1;
+                return session_responder(nmp, ctx) ? -1 : 0;
+            }
+
             break;
         }
     }
@@ -3093,7 +3090,7 @@ struct nmp_data *nmp_new(const nmp_conf_t *conf)
         return NULL;
     }
 
-    const sa_family_t sa_family = conf->addr.sa.sa_family ?: AF_INET;
+    const sa_family_t sa_family = conf->addr.sa.sa_family ? : AF_INET;
     if (sa_family != AF_INET && sa_family != AF_INET6)
     {
         log("sa_family");
@@ -3107,7 +3104,7 @@ struct nmp_data *nmp_new(const nmp_conf_t *conf)
         return NULL;
     }
 
-    const u16 ka = conf->keepalive_interval ?: SESSION_TIMER_KEEPALIVE;
+    const u16 ka = conf->keepalive_interval ? : SESSION_TIMER_KEEPALIVE;
 
     // if selected value is greater than default inactivity timeout, perform
     // 3 retries; otherwise perform enough retries to reach timeout naturally
@@ -3207,7 +3204,7 @@ struct nmp_data *nmp_new(const nmp_conf_t *conf)
     tmp->retries[SESSION_STATUS_ACKWAIT] = SESSION_TIMER_RETRIES_MAX;
 
     tmp->options = conf->options;
-    tmp->payload = conf->payload ?: NMP_PAYLOAD_MAX;
+    tmp->payload = conf->payload ? : NMP_PAYLOAD_MAX;
     tmp->payload += sizeof(msg_header); // we store 'real' payload limit
 
     tmp->rx_context = conf->auth_ctx;
