@@ -27,6 +27,10 @@ typedef struct nmp_data nmp_t;
 // maximum amount of data sent in a single message
 #define NMP_PAYLOAD_MAX         1452
 
+// verify that the address we send to matches
+// address we receive from
+#define NMP_ADDR_VERIFY         1
+
 
 typedef enum
 {
@@ -67,6 +71,9 @@ typedef struct
     // controls how often to send keepalive packet
     // zero sets a default value of NMP_KEEPALIVE_DEFAULT (10)
     uint16_t keepalive_interval;
+
+    // mask for options
+    uint32_t options;
 
     // this pointer is passed to auth_cb so that application
     // can have its context for processing connection requests

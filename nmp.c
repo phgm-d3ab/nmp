@@ -529,6 +529,25 @@ static void hash_table_remove(hash_table *ht, const u32 id)
 }
 
 
+static i32 hash_table_wipe(hash_table *ht, u32 (*destructor)(void *))
+{
+    for (u32 i = 0; ht->items && i < HASH_TABLE_RS; i++)
+    {
+        if (ht->entry[i].ptr)
+        {
+            if (destructor(ht->entry[i].ptr))
+            {
+                log("destructor failed (%p)", ht->entry[i].ptr);
+                return 1;
+            }
+
+            ht->items -= 1;
+        }
+    }
+
+    return 0;
+}
+
 /*
  *  socket pair wrappers
  */
@@ -677,6 +696,7 @@ struct nmp_data
     i32 local_tx;
     u16 payload;
     u16 keepalive_interval;
+    u32 options;
     sa_family_t sa_family;
     u8 retries[6];
 
@@ -2506,6 +2526,7 @@ static i32 event_net_data(main_context nmp, session_context ctx, const u32 paylo
     }
 }
 
+
 static u32 event_net_ack(main_context nmp, session_context ctx, const u32 payload)
 {
     assert(ctx->state != SESSION_STATUS_NONE);
@@ -2537,8 +2558,15 @@ static u32 event_net_ack(main_context nmp, session_context ctx, const u32 payloa
     return (u32) acks;
 }
 
+
 static i32 event_net_initiator(main_context nmp, const u32 id, const addr_internal *addr)
 {
+    if (nmp->auth_cb == NULL)
+    {
+        log("auth callback not set, skipping");
+        return 0;
+    }
+
     session_context ctx = hash_table_lookup(&nmp->sessions, id);
     if (ctx)
     {
@@ -2739,10 +2767,14 @@ static i32 event_net_read(main_context nmp,
         return 0;
     }
 
-    if (mem_cmp(&ctx->addr.generic, &addr->generic, sizeof(addr_internal)) != 0)
+    if (nmp->options & NMP_ADDR_VERIFY)
     {
-        log("rejecting addr != recvfrom().addr");
-        return 0;
+        if (mem_cmp(&ctx->addr.generic, &addr->generic,
+                    sizeof(addr_internal)) != 0)
+        {
+            log("rejecting addr != recvfrom().addr");
+            return 0;
+        }
     }
 
     *ctx_ptr = ctx;
@@ -3004,19 +3036,40 @@ static u32 event_network(main_context nmp)
 ///////////////////////////
 /*
  *  wipe the sessions, close descriptors,
- *  free main structure
+ *  free() main structure
  */
-static void nmp_destroy(main_context nmp)
+static u32 nmp_destroy(main_context nmp)
 {
     errno = 0;
 
-    close(nmp->epoll_fd);
-    close(nmp->net_udp);
-    close(nmp->local_rx);
-    close(nmp->local_tx);
+    if (hash_table_wipe(&nmp->sessions,
+                        (u32 (*)(void *)) session_destroy))
+    {
+        return 1;
+    }
 
+    const i32 descriptors[] =
+            {
+                    nmp->epoll_fd,
+                    nmp->net_udp,
+                    nmp->local_rx,
+                    nmp->local_tx,
+            };
+
+    for (u32 i = 0; i < sizeof(descriptors) / sizeof(u32); i++)
+    {
+        if (close(descriptors[i]))
+        {
+            log("failed to close() at index %u", i);
+            return 1;
+        }
+    }
+
+    mem_zero(nmp, sizeof(struct nmp_data));
     mem_free(nmp);
     assert(errno == 0);
+
+    return 0;
 }
 
 /*
@@ -3034,7 +3087,7 @@ struct nmp_data *nmp_new(const nmp_conf_t *conf)
         return NULL;
     }
 
-    const sa_family_t sa_family = conf->addr.sa.sa_family ? : AF_INET;
+    const sa_family_t sa_family = conf->addr.sa.sa_family ?: AF_INET;
     if (sa_family != AF_INET && sa_family != AF_INET6)
     {
         log("sa_family");
@@ -3048,7 +3101,7 @@ struct nmp_data *nmp_new(const nmp_conf_t *conf)
         return NULL;
     }
 
-    const u16 ka = conf->keepalive_interval ? : SESSION_TIMER_KEEPALIVE;
+    const u16 ka = conf->keepalive_interval ?: SESSION_TIMER_KEEPALIVE;
 
     // if selected value is greater than default inactivity timeout, perform
     // 3 retries; otherwise perform enough retries to reach timeout naturally
@@ -3147,7 +3200,8 @@ struct nmp_data *nmp_new(const nmp_conf_t *conf)
     tmp->retries[SESSION_STATUS_ESTAB] = ka_max;
     tmp->retries[SESSION_STATUS_ACKWAIT] = SESSION_TIMER_RETRIES_MAX;
 
-    tmp->payload = conf->payload ? : NMP_PAYLOAD_MAX;
+    tmp->options = conf->options;
+    tmp->payload = conf->payload ?: NMP_PAYLOAD_MAX;
     tmp->payload += sizeof(msg_header); // we store 'real' payload limit
 
     tmp->rx_context = conf->auth_ctx;
@@ -3437,8 +3491,7 @@ u32 nmp_run(main_context nmp, const i32 timeout)
 
                     case 1: // termination request
                     {
-                        nmp_destroy(nmp);
-                        return 0;
+                        return nmp_destroy(nmp);
                     }
 
                     case -1: // errors
