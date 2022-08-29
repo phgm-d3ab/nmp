@@ -30,9 +30,6 @@ if (CMAKE_BUILD_TYPE MATCHES Debug)
     # strerrorname_np()
     target_compile_definitions(${PROJECT_NAME} PRIVATE _GNU_SOURCE)
 
-    # disable transport layer encryption
-    #target_compile_definitions(nmp PRIVATE NMP_DEBUG_AEAD)
-
     # disable timers
     #target_compile_definitions(nmp PRIVATE NMP_DEBUG_TIMERS)
 endif ()

@@ -150,7 +150,8 @@ uint32_t nmp_run(nmp_t *, int32_t timeout);
  *  returns zero on success
  */
 uint32_t nmp_connect(nmp_t *, const uint8_t pub[NMP_KEYLEN],
-                     const struct sockaddr *, void *ctx);
+                     const struct sockaddr *, socklen_t,
+                     void *ctx);
 
 
 /*

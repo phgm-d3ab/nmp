@@ -65,7 +65,6 @@ static const char *nmp_types[] =
         };
 
 
-#   define UNUSED(arg_)    ((void)(arg_))
 #   define static
 #   define inline
 
@@ -75,6 +74,9 @@ static const char *nmp_types[] =
 #   define log_errno()
 
 #endif // NMP_DEBUG
+
+
+#define UNUSED(arg_)    ((void)(arg_))
 
 
 // cosmetics mainly
@@ -1478,43 +1480,6 @@ static inline void crypto_hash(const u8 *input, const u32 input_len,
 }
 
 
-#if defined(NMP_DEBUG_AEAD)
-
-static void crypto_aead_encrypt(const u8 key[32],
-                                const u32 constant, const u64 counter,
-                                const u8 *aad, const u32 aad_len,
-                                const u8 *payload, const u32 payload_len,
-                                u8 *output, u8 tag[16])
-{
-    UNUSED(key);
-    UNUSED(constant);
-    UNUSED(counter);
-    UNUSED(aad);
-    UNUSED(aad_len);
-
-    mem_zero(tag, 16);
-    mem_copy(output, payload, payload_len);
-}
-
-static u32 crypto_aead_decrypt(const u8 key[NMP_KEYLEN],
-                               const u32 constant, const u64 counter,
-                               const u8 *aad, const u32 aad_len,
-                               const u8 *payload, const u32 payload_len,
-                               const u8 tag[16], u8 *output)
-{
-    UNUSED(key);
-    UNUSED(constant);
-    UNUSED(counter);
-    UNUSED(aad);
-    UNUSED(aad_len);
-    UNUSED(tag);
-
-    mem_copy(output, payload, payload_len);
-    return 0;
-}
-
-#else // NMP_DEBUG_AEAD
-
 static void crypto_aead_encrypt(const u8 key[CRYPTO_KEYLEN],
                                 const u32 constant, const u64 counter,
                                 const u8 *aad, const u32 aad_len,
@@ -1543,7 +1508,6 @@ static u32 crypto_aead_decrypt(const u8 key[NMP_KEYLEN],
                                      tag, output);
 }
 
-#endif // NMP_DEBUG_AEAD
 
 /*
  *
@@ -2332,7 +2296,7 @@ static i32 event_local(main_context nmp)
     session_context ctx = NULL;
     event_local_buf buf = {0};
 
-    if (local_receive(nmp->local_rx, &buf.header) == -1)
+    if (local_receive(nmp->local_rx, (local_event *) &buf) == -1)
     {
         log_errno();
         return -1;
@@ -3251,7 +3215,7 @@ struct nmp_data *nmp_new(const nmp_conf_t *conf)
  */
 u32 nmp_connect(main_context nmp,
                 const u8 pub[NMP_KEYLEN],
-                const struct sockaddr *addr,
+                const struct sockaddr *addr, const socklen_t socklen,
                 void *ctx)
 {
     if (!pub || !addr)
@@ -3282,9 +3246,7 @@ u32 nmp_connect(main_context nmp,
     ctx_new->context_ptr = ctx;
     ctx_new->session_id = id;
     mem_copy(ctx_new->remote_static, pub, NMP_KEYLEN);
-    mem_copy(&ctx_new->addr.generic, addr, nmp->sa_family == AF_INET ?
-                                           sizeof(struct sockaddr_in) :
-                                           sizeof(struct sockaddr_in6));
+    mem_copy(&ctx_new->addr.generic, addr, socklen);
 
     const local_event ev =
             {
