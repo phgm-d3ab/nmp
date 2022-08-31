@@ -27,6 +27,10 @@ typedef struct nmp_data nmp_t;
 // maximum amount of data sent in a single message
 #define NMP_PAYLOAD_MAX         1452
 
+// maximum size of application defined payload
+// included with requests and responses
+#define NMP_INITIATION_PAYLOAD     120
+
 // verify that the address we send to matches
 // address we receive from
 #define NMP_ADDR_VERIFY         1
@@ -34,26 +38,90 @@ typedef struct nmp_data nmp_t;
 
 typedef enum
 {
-    NMP_SESSION_ERR,
-    NMP_SESSION_DC,         // session disconnected
-    NMP_SESSION_TX,         // outgoing connection
-    NMP_SESSION_RX,         // incoming connection
-    NMP_SESSION_QUEUE,      // queue is full
-    NMP_SESSION_MAX,        // maximum number of connections
+    // useful when returning empty command
+    // from callbacks that discard result
+    NMP_CMD_EMPTY = 0,
 
-} nmp_notification;
+    NMP_CMD_ACCEPT,
+    NMP_CMD_RESPOND,
+    NMP_CMD_DROP,
+
+    NMP_SESSION_ERR,        // todo
+
+    // session stopped receiving any data
+    // from remote peer, and is no longer active
+    // message id of latest acknowledged message
+    // is stored in nmp_status_container
+    NMP_SESSION_DISCONNECTED,
+
+    // outgoing connection started with nmp_connect()
+    // received a valid response. nmp_status_container
+    // holds a payload sent by a remote peer.
+    // return ACCEPT or DROP command to indicate action
+    NMP_SESSION_RESPONSE,
+
+    // incoming connection has been established
+    NMP_SESSION_INCOMING,
+
+    // queue is full: outgoing message was not queued
+    // for sending. nmp_status_container holds a msg
+    // id for latest queued message
+    NMP_SESSION_QUEUE,
+
+    // could not start a new (outgoing) session;
+    // id of cancelled session is stored in
+    // nmp_status_container
+    NMP_SESSION_MAX,
+
+    // no more data can be sent over this session,
+    // and it is dropped immediately
+    // note: this happens only when running out of
+    // nonces, so, in a very unlikely event when
+    // 2^64 - 1 packets were sent over network
+    NMP_SESSION_EXPIRED,
+
+
+} nmp_status;
+
+
+// convenience
+typedef union
+{
+    struct sockaddr sa;
+    struct sockaddr_in ip4;
+    struct sockaddr_in6 ip6;
+
+} nmp_sa;
+
+
+// members .addr, .id, .request_payload are
+// set by the library; .context_ptr and
+// .response_payload are set by application
+typedef struct
+{
+    nmp_sa addr;
+    uint32_t id;
+    uint8_t *request_payload;
+
+    void *context_ptr;
+    uint8_t response_payload[NMP_INITIATION_PAYLOAD];
+
+} nmp_request_container;
+
+
+typedef union
+{
+    uint8_t payload[NMP_INITIATION_PAYLOAD];
+    uint64_t msg_id;
+    uint32_t session_id;
+
+} nmp_status_container;
 
 
 typedef struct
 {
     // address to bind to
-    union
-    {
-        struct sockaddr_in v4;
-        struct sockaddr_in6 v6;
-        struct sockaddr sa;
-
-    } addr;
+    nmp_sa addr;
 
     // secret (private) key to use
     // public key is derived using curve25519
@@ -75,18 +143,17 @@ typedef struct
     // mask for options
     uint32_t options;
 
-    // this pointer is passed to auth_cb so that application
-    // can have its context for processing connection requests
-    void *auth_ctx;
 
-    // initiator packet has been received: remote public
-    // key, remote network address and would-be session id
-    // is provided; application should return NULL to deny
-    // or pointer to session context to accept this connection
-    void *(*auth_cb)(const uint8_t *pubkey,
-                     const struct sockaddr *,
-                     uint32_t session,
-                     void *auth_ctx);
+    // this pointer is passed to request_cb so that application
+    // can have its context for processing connection requests
+    void *request_ctx;
+
+    // incoming request has arrived: make a decision,
+    // optionally populate response_payload member
+    // and return one of NMP_REQUEST_* values
+    nmp_status (*request_cb)(const uint8_t *pubkey,
+                             nmp_request_container *request,
+                             void *request_ctx);
 
 
     // new message has arrived
@@ -105,16 +172,17 @@ typedef struct
     void (*ack_cb)(const uint64_t,
                    void *session_ctx);
 
-    // deliver various session events:
-    // errors, connection status changes
-    void (*notification_cb)(const nmp_notification,
-                            void *session_ctx);
-
     // shows the amount of valid data delivered to context
     // from recvfrom() and the amount of data fed to sendto()
     void (*stats_cb)(const uint64_t rx,
                      const uint64_t tx,
                      void *session_ctx);
+
+    // deliver various session events:
+    // errors, connection status changes
+    nmp_status (*status_cb)(const nmp_status,
+                            const nmp_status_container *,
+                            void *session_ctx);
 
 } nmp_conf_t;
 
@@ -141,16 +209,15 @@ uint32_t nmp_run(nmp_t *, int32_t timeout);
 
 
 /*
- *  connect to some host using public key and address
- *  this will trigger a notification to show the result
- *  note: length of buffer pointed to by address argument
- *  is assumed sufficient to hold an address of a
- *  family specified in sa_family member
+ *  connect to some host using public key and address,
+ *  this will trigger a notification to show the result.
+ *  optionally include a payload as part of this request,
+ *  sizes up to NMP_INITIATION_PAYLOAD (120) are accepted
  *
  *  returns zero on success
  */
-uint32_t nmp_connect(nmp_t *, const uint8_t pub[NMP_KEYLEN],
-                     const struct sockaddr *, socklen_t,
+uint32_t nmp_connect(nmp_t *, const uint8_t *pub, const nmp_sa *addr,
+                     const void *payload, uint32_t payload_len,
                      void *ctx);
 
 
@@ -182,7 +249,8 @@ uint32_t nmp_send_noack(nmp_t *, uint32_t session,
                         const uint8_t *data, uint16_t len);
 
 /*
- *  exit gracefully terminating all existing sessions
+ *  exit gracefully, terminate all existing sessions,
+ *  release all related resources
  */
 uint32_t nmp_terminate(nmp_t *);
 
