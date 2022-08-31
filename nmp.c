@@ -12,7 +12,6 @@
 #include <errno.h>
 #include <unistd.h>
 #include <time.h>
-#include <arpa/inet.h>
 #include <assert.h>
 
 #include <sys/socket.h>
@@ -56,12 +55,32 @@ static void __log_timestamp(char *output)
 #   define log(fmt_, ...)  __log(fmt_, ##__VA_ARGS__)
 #   define log_errno()      log("%s", strerrordesc_np(errno))
 
-static const char *nmp_types[] =
+
+// make logs a bit more readable
+static const char *nmp_dbg_packet_types[] =
         {
                 "request",
                 "response",
                 "data",
                 "ack",
+        };
+
+static const char *nmp_dbg_session_status[] =
+        {
+                "SESSION_STATUS_NONE",
+                "SESSION_STATUS_RESPONSE",
+                "SESSION_STATUS_CONFIRM",
+                "SESSION_STATUS_WINDOW",
+                "SESSION_STATUS_ESTAB",
+                "SESSION_STATUS_ACKWAIT",
+        };
+
+static const char *nmp_dbg_msg_status[] =
+        {
+                "MSG_TX_EMPTY",
+                "MSG_TX_SENT",
+                "MSG_TX_QUEUED",
+                "MSG_TX_ACKED",
         };
 
 
@@ -218,7 +237,7 @@ static inline u32 network_send(const i32 soc,
                               SENDTO_OPT,
                               &addr->sa, sizeof(nmp_sa));
 
-    log("%s %zi", nmp_types[*((u8 *) data)], sent);
+    log("%s %zi", nmp_dbg_packet_types[*((u8 *) data)], sent);
 
     if (sent != (isize) amt)
     {
@@ -242,7 +261,7 @@ static inline u32 network_receive(const i32 soc,
                                &addr->sa, &addr_len);
 
     log("%s %zi (%s)",
-        (amt > 0 && *buf < 4) ? nmp_types[*buf] : "",
+        (amt > 0 && *buf < 4) ? nmp_dbg_packet_types[*buf] : "",
         amt, strerrorname_np(errno));
 
     if (amt < PACKET_MIN || amt > PACKET_MAX)
@@ -712,7 +731,7 @@ static_assert((MSG_RXQUEUE & (MSG_RXQUEUE - 1)) == 0, "MSG_RXQUEUE must be a pow
  *  compare sequence numbers:
  *  cover for 'wraparound'
  */
-static inline i32 sequence_cmp(const u16 a, const u16 b)
+static inline i32 msg_sequence_cmp(const u16 a, const u16 b)
 {
     return ((a <= b) ? ((b - a) > 0xff) : ((a - b) < 0xff));
 }
@@ -721,7 +740,7 @@ static inline i32 sequence_cmp(const u16 a, const u16 b)
 /*
  *  zero pad payload, make total length multiple of 16
  */
-static inline i32 payload_zeropad(u8 *payload, const i32 len)
+static inline i32 msg_payload_zeropad(u8 *payload, const i32 len)
 {
     const i32 padding = (16 - len) & 15;
     const i32 payload_len = len + padding;
@@ -736,17 +755,17 @@ static inline i32 payload_zeropad(u8 *payload, const i32 len)
 }
 
 
-static inline void tx_include(const msg_tx *tx, msg_header *msg)
+static inline void msg_tx_include(const msg_tx *tx, msg_header *msg)
 {
     msg->sequence = tx->seq;
     msg->len = tx->len;
 
     mem_copy(msg->data, tx->msg, tx->len);
-    log("seq %u status %u", msg->sequence, tx->status);
+    log("seq %u %s", msg->sequence, nmp_dbg_msg_status[tx->status]);
 }
 
 
-static inline void rx_copy(msg_rx *entry, const msg_header *msg)
+static inline void msg_rx_copy(msg_rx *entry, const msg_header *msg)
 {
     entry->status = MSG_RX_RECEIVED;
     entry->seq = msg->sequence;
@@ -754,6 +773,12 @@ static inline void rx_copy(msg_rx *entry, const msg_header *msg)
 
     mem_copy(entry->data, msg->data, msg->len);
     log("seq %u len %u", msg->sequence, msg->len);
+}
+
+
+static inline u64 msg_get_latest(const msg_state *ctx)
+{
+    return tx_get(ctx, ctx->tx_ack)->id;
 }
 
 
@@ -855,7 +880,7 @@ static i32 msg_assemble(msg_state *ctx,
                 break;
             }
 
-            tx_include(msg, (msg_header *) (output + bytes));
+            msg_tx_include(msg, (msg_header *) (output + bytes));
 
             bytes += offset;
             msg->status = MSG_TX_SENT;
@@ -876,11 +901,11 @@ static i32 msg_assemble(msg_state *ctx,
             break;
         }
 
-        tx_include(resend_queue[i], (msg_header *) (output + bytes));
+        msg_tx_include(resend_queue[i], (msg_header *) (output + bytes));
         bytes += offset;
     }
 
-    return payload_zeropad(output, (i32) bytes);
+    return msg_payload_zeropad(output, (i32) bytes);
 }
 
 
@@ -900,7 +925,7 @@ static u32 msg_assemble_retry(msg_state *ctx,
                 break;
             }
 
-            tx_include(msg, (msg_header *) (output + bytes));
+            msg_tx_include(msg, (msg_header *) (output + bytes));
             bytes += offset;
         }
 
@@ -910,7 +935,7 @@ static u32 msg_assemble_retry(msg_state *ctx,
         }
     }
 
-    return (u32) payload_zeropad(output, (i32) bytes);
+    return (u32) msg_payload_zeropad(output, (i32) bytes);
 }
 
 /*
@@ -923,7 +948,7 @@ u32 msg_assemble_noack(msg_header *header, const u8 *payload, const u16 len)
     header->len |= MSG_NOACK;
 
     mem_copy(header->data, payload, len);
-    return payload_zeropad(header->data, (i32) (len + sizeof(msg_header)));
+    return msg_payload_zeropad(header->data, (i32) (len + sizeof(msg_header)));
 }
 
 
@@ -985,11 +1010,11 @@ static i32 msg_read(const msg_routines *cb, msg_state *ctx,
 
 
         // no point processing anything below latest delivered
-        if (sequence_cmp(msg->sequence, seq_low))
+        if (msg_sequence_cmp(msg->sequence, seq_low))
         {
             // detect message with sequence number higher
             // than latest acked (from our side) + MSG_WINDOW
-            if (sequence_cmp(msg->sequence, seq_high))
+            if (msg_sequence_cmp(msg->sequence, seq_high))
             {
                 log("rejecting sequence %u over %u",
                     msg->sequence, seq_high);
@@ -998,7 +1023,7 @@ static i32 msg_read(const msg_routines *cb, msg_state *ctx,
             }
 
             // update rx_seq?
-            if (sequence_cmp(msg->sequence, ctx->rx_seq))
+            if (msg_sequence_cmp(msg->sequence, ctx->rx_seq))
             {
                 ctx->rx_seq = msg->sequence;
             }
@@ -1007,7 +1032,7 @@ static i32 msg_read(const msg_routines *cb, msg_state *ctx,
             if (entry->status == MSG_RX_EMPTY)
             {
                 new_messages += 1;
-                rx_copy(entry, msg);
+                msg_rx_copy(entry, msg);
             }
         }
 
@@ -1095,9 +1120,9 @@ static i32 msg_ack_read(msg_state *ctx, const msg_ack *ack)
     u32 mask = ack->ack_mask;
 
 
-    if (sequence_cmp(ack->ack, ctx->tx_ack))
+    if (msg_sequence_cmp(ack->ack, ctx->tx_ack))
     {
-        if (sequence_cmp(ack->ack, ctx->tx_sent))
+        if (msg_sequence_cmp(ack->ack, ctx->tx_sent))
         {
             // remote peer tries to send ack for something
             // we did not send yet, cannot have this
@@ -1696,6 +1721,7 @@ static_assert(NMP_KEYLEN == NOISE_KEYLEN, "keylen");
 typedef struct nmp_data *main_context;
 typedef struct session *session_context;
 
+
 enum packet_types
 {
     NMP_REQUEST = 0,
@@ -1734,7 +1760,7 @@ typedef struct
 {
     struct
     {
-        nmp_header type_plus_id;
+        nmp_header type_pad_id;
         u64 counter;
 
     } header;
@@ -1756,6 +1782,7 @@ enum session_status
 };
 
 
+// payload 1 for request, 2 for response
 typedef struct
 {
     noise_handshake handshake;
@@ -1764,19 +1791,10 @@ typedef struct
         u64 timestamp;
         u8 data[NMP_INITIATION_PAYLOAD];
 
-    } request_payload;
+    } payload[2];
 
-    union
-    {
-        nmp_status_container response_container;
-        u8 response_payload[NOISE_HANDSHAKE_PAYLOAD];
-    };
-
-    union
-    {
-        nmp_request initiator_saved;
-        nmp_response responder_saved;
-    };
+    nmp_request buf_request;
+    nmp_response buf_response;
 
 } session_initiation;
 
@@ -1903,7 +1921,7 @@ static session_context session_new(const i32 epoll_fd)
 
     ctx->timer_fd = timer;
 
-    // sequence numbers start at zero but sequence_cmp()
+    // sequence numbers start at zero but msg_sequence_cmp()
     // is a strict '>' so set state counters to 0xffff,
     // exactly one before the u16 wraps around to zero
     ctx->transport.tx_seq = 0xffff;
@@ -1980,7 +1998,7 @@ static u32 session_transport_send(main_context nmp, session_context ctx,
     u8 *ciphertext = packet->payload;
     u8 *mac = ciphertext + amt;
 
-    packet->header.type_plus_id = header_initialize(type, ctx->session_id);
+    packet->header.type_pad_id = header_initialize(type, ctx->session_id);
     packet->header.counter = ctx->noise_counter_send;
 
     noise_encrypt(ctx->noise_key_send, ctx->noise_counter_send,
@@ -2006,7 +2024,7 @@ static i32 session_transport_receive(session_context ctx,
     const i32 payload_len = (i32) (packet_len - sizeof(nmp_transport) - NOISE_AEAD_MAC);
     if (payload_len < 0)
     {
-        log("rejecting packet size %xu", packet->header.type_plus_id.session_id);
+        log("rejecting packet size %xu", packet->header.type_pad_id.session_id);
         return -1;
     }
 
@@ -2015,7 +2033,7 @@ static i32 session_transport_receive(session_context ctx,
                                                    counter_remote);
     if (block_index < 0)
     {
-        log("counter rejected %xu", packet->header.type_plus_id.session_id);
+        log("counter rejected %xu", packet->header.type_pad_id.session_id);
         return -1;
     }
 
@@ -2028,7 +2046,7 @@ static i32 session_transport_receive(session_context ctx,
                       ciphertext, payload_len,
                       mac, ctx->payload))
     {
-        log("decryption failed %xu", packet->header.type_plus_id.session_id);
+        log("decryption failed %xu", packet->header.type_pad_id.session_id);
         return -1;
     }
 
@@ -2057,50 +2075,53 @@ static i32 session_transport_receive(session_context ctx,
 
 static u32 session_request(main_context nmp, session_context ctx)
 {
-    nmp_request *request = &ctx->initiation.initiator_saved;
-    const u64 tai_now = time_get();
-    if (tai_now == 0)
+    assert(ctx->state == SESSION_STATUS_NONE);
+    session_initiation *initiation = &ctx->initiation;
+
+    initiation->payload[0].timestamp = time_get();
+    if (initiation->payload[0].timestamp == 0)
     {
         return 1;
     }
 
-    request->header = header_initialize(NMP_REQUEST, ctx->session_id);
-    ctx->initiation.request_payload.timestamp = tai_now;
-
-    if (noise_initiator_write(&ctx->initiation.handshake, &request->initiator,
-                              &request->header, sizeof(nmp_header),
-                              (u8 *) &ctx->initiation.request_payload))
+    initiation->buf_request.header = header_initialize(NMP_REQUEST, ctx->session_id);
+    if (noise_initiator_write(&initiation->handshake,
+                              &initiation->buf_request.initiator,
+                              &initiation->buf_request, sizeof(nmp_header),
+                              (u8 *) &ctx->initiation.payload[0]))
     {
         return 1;
     }
 
     if (network_send(nmp->net_udp,
-                     request, sizeof(nmp_request), &ctx->addr))
+                     &initiation->buf_request, sizeof(nmp_request),
+                     &ctx->addr))
     {
         return 1;
     }
 
     ctx->stat_tx += sizeof(nmp_request);
-    return (ctx->state == SESSION_STATUS_RESPONSE) ? 0 :
-           timerfd_interval(ctx->timer_fd, SESSION_TIMER_RETRY);
+    return timerfd_interval(ctx->timer_fd, SESSION_TIMER_RETRY);
 }
 
 
 static u32 session_response(main_context nmp, session_context ctx)
 {
-    nmp_response *response = &ctx->initiation.responder_saved;
-    response->header = header_initialize(NMP_RESPONSE, ctx->session_id);
+    assert(ctx->state == SESSION_STATUS_NONE);
+    session_initiation *initiation = &ctx->initiation;
+    initiation->buf_response.header = header_initialize(NMP_RESPONSE, ctx->session_id);
+    initiation->payload[1].timestamp = 0;
 
-    if (noise_responder_write(&ctx->initiation.handshake,
-                              &response->responder,
-                              &response->header, sizeof(nmp_header),
-                              ctx->initiation.response_payload))
+    if (noise_responder_write(&initiation->handshake,
+                              &initiation->buf_response.responder,
+                              &initiation->buf_response.header, sizeof(nmp_header),
+                              (u8 *) &initiation->payload[1]))
     {
         return 1;
     }
 
 
-    if (network_send(nmp->net_udp, response,
+    if (network_send(nmp->net_udp, &initiation->buf_response,
                      sizeof(nmp_response), &ctx->addr))
     {
         return 1;
@@ -2132,6 +2153,7 @@ static u32 session_data(main_context nmp, session_context ctx)
     // NONE, RESPONSE, CONFIRM, WINDOW
     if (ctx->state < SESSION_STATUS_ESTAB)
     {
+        log("rejecting state %s", nmp_dbg_session_status[ctx->state]);
         return 0;
     }
 
@@ -2184,6 +2206,7 @@ static u32 session_data(main_context nmp, session_context ctx)
     return 0;
 }
 
+
 /*
  *
  */
@@ -2191,13 +2214,9 @@ static u32 session_data_retry(main_context nmp, session_context ctx)
 {
     const u32 amt = msg_assemble_retry(&ctx->transport,
                                        ctx->payload, nmp->payload);
-    if (amt)
-    {
-        return session_transport_send(nmp, ctx,
-                                      ctx->payload, (i32) amt, NMP_DATA);
-    }
-
-    return 0;
+    return amt ? session_transport_send(nmp, ctx,
+                                        ctx->payload, (i32) amt, NMP_DATA)
+               : 0;
 }
 
 
@@ -2211,7 +2230,7 @@ static u32 session_data_noack(main_context nmp, session_context ctx,
     // this context is not ready yet
     if (ctx->state < SESSION_STATUS_WINDOW)
     {
-        log("skipping noack");
+        log("skipping noack (%s)", nmp_dbg_session_status[ctx->state]);
         return 0;
     }
 
@@ -2320,17 +2339,20 @@ static i32 event_local_noack(main_context nmp,
     return 0;
 }
 
+
 static i32 event_local_drop(main_context nmp,
                             session_context ctx,
                             const event_local_buf *event)
 {
     UNUSED(event);
 
-    // fixme: application has requested drop
-    //        why do we need a callback here?
-    session_drop(nmp, ctx, NMP_SESSION_DISCONNECTED, NULL);
+    // same as session_drop(), except here we are not
+    // doing status callback as it does not make sense
+    ctx->state = SESSION_STATUS_NONE;
+    hash_table_remove(&nmp->sessions, ctx->session_id);
     return 0;
 }
+
 
 /*
  *  note: in case of errors it safe to delete
@@ -2346,8 +2368,8 @@ static i32 event_local_new(main_context nmp,
 
     if (ctx_new->state)
     {
-        log("rejecting connection request: wrong state %u %p",
-            ctx_new->state, ctx_new);
+        log("rejecting connection request: wrong state %s %p",
+            nmp_dbg_session_status[ctx_new->state], ctx_new);
         goto fail;
     }
 
@@ -2475,12 +2497,14 @@ static u32 event_timer(main_context nmp, session_context ctx)
     }
 
     ctx->timer_retries += 1;
-    log("state %u retry %u", ctx->state, nmp->retries[ctx->state]);
+    log("state %s try %u/%u", nmp_dbg_session_status[ctx->state],
+        ctx->timer_retries, nmp->retries[ctx->state]);
 
     if (ctx->timer_retries >= nmp->retries[ctx->state])
     {
-        session_drop(nmp, ctx, NMP_SESSION_DISCONNECTED, NULL);
-        return 0;
+        const nmp_status_container latest = {.msg_id = msg_get_latest(&ctx->transport)};
+        session_drop(nmp, ctx, NMP_SESSION_DISCONNECTED, &latest);
+        return session_destroy(ctx);
     }
 
     switch (ctx->state)
@@ -2511,7 +2535,7 @@ static u32 event_timer(main_context nmp, session_context ctx)
             // retry sending initiator:
             // just take a stored copy
             if (network_send(nmp->net_udp,
-                             &ctx->initiation.initiator_saved, sizeof(nmp_request),
+                             &ctx->initiation.buf_request, sizeof(nmp_request),
                              &ctx->addr))
             {
                 return 1;
@@ -2525,7 +2549,8 @@ static u32 event_timer(main_context nmp, session_context ctx)
         {
             // this means connection timed out, and we didn't
             // get any data after sending response(s)
-            session_drop(nmp, ctx, NMP_SESSION_DISCONNECTED, NULL);
+            const nmp_status_container latest = {.msg_id = msg_get_latest(&ctx->transport)};
+            session_drop(nmp, ctx, NMP_SESSION_DISCONNECTED, &latest);
             return session_destroy(ctx);
         }
 
@@ -2742,7 +2767,7 @@ static i32 event_net_request(main_context nmp, const u32 id, const nmp_sa *addr)
     ctx->session_id = id;
     ctx->stat_rx += sizeof(nmp_request);
 
-    mem_copy(ctx->initiation.response_container.payload,
+    mem_copy(ctx->initiation.payload[1].data,
              request.response_payload, NMP_INITIATION_PAYLOAD);
     ctx->initiation.handshake = handshake;
 
@@ -2760,6 +2785,8 @@ static i32 event_net_request(main_context nmp, const u32 id, const nmp_sa *addr)
     noise_split(&ctx->initiation.handshake,
                 ctx->noise_key_receive,
                 ctx->noise_key_send);
+    ctx->noise_counter_receive = 0;
+    ctx->noise_counter_send = 0;
     return 0;
 }
 
@@ -2767,10 +2794,8 @@ static i32 event_net_request(main_context nmp, const u32 id, const nmp_sa *addr)
 static u32 event_net_response(main_context nmp, session_context ctx, const u32 amt)
 {
     assert(ctx->state != SESSION_STATUS_NONE);
-
     if (nmp->status_cb == NULL)
     {
-        // fixme probably drop session in this case
         log("callback not set, skipping response.");
         return 0;
     }
@@ -2791,14 +2816,14 @@ static u32 event_net_response(main_context nmp, session_context ctx, const u32 a
     if (noise_responder_read(&ctx->initiation.handshake,
                              &nmp->net_response.responder,
                              &nmp->net_response.header, sizeof(nmp_header),
-                             ctx->initiation.response_payload))
+                             (u8 *) &ctx->initiation.payload[1]))
     {
-        log("dropping response for %xu", ctx->session_id);
+        log("failed to read response for %xu", ctx->session_id);
         return 0;
     }
 
     switch (nmp->status_cb(NMP_SESSION_RESPONSE,
-                           &ctx->initiation.response_container,
+                           (const nmp_status_container *) &ctx->initiation.payload[1].data,
                            ctx->context_ptr))
     {
         case NMP_CMD_ACCEPT:
@@ -2853,6 +2878,7 @@ static u32 event_net_response(main_context nmp, session_context ctx, const u32 a
 
     return timerfd_interval(ctx->timer_fd, nmp->keepalive_interval);
 }
+
 
 /*
  *
@@ -3092,7 +3118,7 @@ static u32 event_network(main_context nmp)
         session_context ctx = net_queue[i];
         if (ctx->state == SESSION_STATUS_NONE)
         {
-            // one (possible out of many) received packets triggered an error
+            // one (possibly out of many) received packets triggered an error
             // that led to session_drop(), this context is not in hash table
             // anymore so no more data after 'fatal packet' but it can still
             // end up here in this queue => ignore
@@ -3417,7 +3443,7 @@ u32 nmp_connect(main_context nmp, const u8 *pub, const nmp_sa *addr,
 
     if (payload)
     {
-        mem_copy(&ctx_new->initiation.request_payload.data,
+        mem_copy(&ctx_new->initiation.payload[0].data,
                  payload, payload_len);
     }
 
