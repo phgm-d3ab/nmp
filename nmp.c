@@ -1239,15 +1239,9 @@ typedef struct
 {
     u8 cipher_k[NOISE_KEYLEN];
     u64 cipher_n;
-    u8 ck[NOISE_HASHLEN];
-    u8 h[NOISE_HASHLEN];
+    u8 symmetric_ck[NOISE_HASHLEN];
+    u8 symmetric_h[NOISE_HASHLEN];
 
-} noise_symmetric;
-
-
-typedef struct
-{
-    noise_symmetric symmetric;
     noise_keypair *s;
     noise_keypair e;
     u8 rs[NOISE_KEYLEN];
@@ -1407,22 +1401,22 @@ static inline u32 noise_decrypt(const u8 *k, const u64 n,
 }
 
 
-static void noise_mix_key(noise_symmetric *symmetric,
+static void noise_mix_key(noise_handshake *state,
                           const u8 *ikm)
 {
     u8 temp_ck[NOISE_KEYLEN];
-    mem_copy(temp_ck, symmetric->ck, NOISE_KEYLEN);
+    mem_copy(temp_ck, state->symmetric_ck, NOISE_KEYLEN);
 
     noise_hkdf(temp_ck, ikm,
-               symmetric->ck,
-               symmetric->cipher_k,
+               state->symmetric_ck,
+               state->cipher_k,
                NULL);
 
     // one of hkdf outputs is our 'temp_k'
     // which effectively does initialize_key(temp_k)
 }
 
-static void noise_mix_hash(noise_symmetric *symmetric,
+static void noise_mix_hash(noise_handshake *state,
                            const void *data, const u32 data_len)
 {
     assert(data_len <= 256);
@@ -1438,45 +1432,56 @@ static void noise_mix_hash(noise_symmetric *symmetric,
 
     } buf = {0};
 
-    mem_copy(buf.h, symmetric->h, NOISE_HASHLEN);
+    mem_copy(buf.h, state->symmetric_h, NOISE_HASHLEN);
     mem_copy(buf.data, data, data_len);
 
     noise_hash(&buf, (NOISE_HASHLEN + data_len),
-               symmetric->h);
+               state->symmetric_h);
 }
 
-static void noise_encrypt_and_hash(noise_symmetric *symmetric,
+
+// serves as a mix_key(dh(..))
+static void noise_mix_key_dh(noise_handshake *state,
+                             const noise_keypair *pair, const u8 *public_key)
+{
+    u8 temp_dh[NOISE_DHLEN] = {0};
+    noise_dh(pair, public_key, temp_dh);
+    noise_mix_key(state, temp_dh);
+}
+
+
+static void noise_encrypt_and_hash(noise_handshake *state,
                                    const void *plaintext, const u32 plaintext_len,
                                    u8 *ciphertext, u8 *mac)
 {
-    noise_encrypt(symmetric->cipher_k, symmetric->cipher_n,
-                  symmetric->h, NOISE_HASHLEN,
+    noise_encrypt(state->cipher_k, state->cipher_n,
+                  state->symmetric_h, NOISE_HASHLEN,
                   plaintext, plaintext_len,
                   ciphertext, mac);
-    noise_mix_hash(symmetric, ciphertext, plaintext_len);
+    noise_mix_hash(state, ciphertext, plaintext_len);
 }
 
 
-static u32 noise_decrypt_and_hash(noise_symmetric *symmetric,
+static u32 noise_decrypt_and_hash(noise_handshake *state,
                                   const u8 *ciphertext, const u32 ciphertext_len,
                                   const u8 *mac, void *plaintext)
 {
-    if (noise_decrypt(symmetric->cipher_k, symmetric->cipher_n,
-                      symmetric->h, NOISE_HASHLEN,
+    if (noise_decrypt(state->cipher_k, state->cipher_n,
+                      state->symmetric_h, NOISE_HASHLEN,
                       ciphertext, ciphertext_len,
                       mac, plaintext))
     {
         return 1;
     }
 
-    noise_mix_hash(symmetric, ciphertext, ciphertext_len);
+    noise_mix_hash(state, ciphertext, ciphertext_len);
     return 0;
 }
 
 
-static void noise_split(const noise_symmetric *symmetric, u8 *c1, u8 *c2)
+static void noise_split(const noise_handshake *state, u8 *c1, u8 *c2)
 {
-    noise_hkdf(symmetric->ck, NULL, // 'zerolen'
+    noise_hkdf(state->symmetric_ck, NULL, // 'zerolen'
                c1,
                c2,
                NULL);
@@ -1489,12 +1494,12 @@ static void noise_initiator_init(noise_handshake *state,
 {
     UNUSED(noise_protocol_name);
     // instead of h = HASH(protocol_name) use precomputed value
-    mem_copy(state->symmetric.h, noise_protocol_hash, NOISE_HASHLEN);
-    mem_copy(state->symmetric.ck, noise_protocol_hash, NOISE_HASHLEN);
+    mem_copy(state->symmetric_h, noise_protocol_hash, NOISE_HASHLEN);
+    mem_copy(state->symmetric_ck, noise_protocol_hash, NOISE_HASHLEN);
 
     state->s = s;
     mem_copy(state->rs, rs, NOISE_KEYLEN);
-    noise_mix_hash(&state->symmetric, rs, NOISE_KEYLEN);
+    noise_mix_hash(state, rs, NOISE_KEYLEN);
 }
 
 
@@ -1503,32 +1508,31 @@ static u32 noise_initiator_write(noise_handshake *state,
                                  const void *ad, const u32 ad_len,
                                  const u8 *payload)
 {
-    noise_mix_hash(&state->symmetric, ad, ad_len);
+    noise_mix_hash(state, ad, ad_len);
 
-    // e: GENERATE_KEYPAIR(), append e.public, mix_hash(e.public)
+    // e
     if (noise_keypair_generate(&state->e))
-    { return 1; }
-    noise_mix_hash(&state->symmetric, state->e.public, NOISE_KEYLEN);
+    {
+        return 1;
+    }
+
+    noise_mix_hash(state, state->e.public, NOISE_KEYLEN);
     mem_copy(initiator->ephemeral, state->e.public, NOISE_KEYLEN);
 
-    // es: mix_key(dh(e, rs))
-    u8 dh_es[NOISE_DHLEN] = {0};
-    noise_dh(&state->e, state->rs, dh_es);
-    noise_mix_key(&state->symmetric, dh_es);
+    // es
+    noise_mix_key_dh(state, &state->e, state->rs);
 
-    // s: encrypt_and_hash(s.public)
-    noise_encrypt_and_hash(&state->symmetric,
+    // s
+    noise_encrypt_and_hash(state,
                            state->s->public, NOISE_KEYLEN,
                            initiator->encrypted_static,
                            initiator->mac1);
 
-    // ss: mix_key(dh(s, rs))
-    u8 dh_ss[NOISE_DHLEN] = {0};
-    noise_dh(state->s, state->rs, dh_ss);
-    noise_mix_key(&state->symmetric, dh_ss);
+    // ss
+    noise_mix_key_dh(state, state->s, state->rs);
 
     // payload: encrypt_and_hash(payload)
-    noise_encrypt_and_hash(&state->symmetric,
+    noise_encrypt_and_hash(state,
                            payload, NOISE_HANDSHAKE_PAYLOAD,
                            initiator->encrypted_payload, initiator->mac2);
     return 0;
@@ -1540,22 +1544,19 @@ static u32 noise_responder_read(noise_handshake *state,
                                 const void *ad, const u32 ad_len,
                                 u8 *payload)
 {
-    noise_mix_hash(&state->symmetric, ad, ad_len);
+    noise_mix_hash(state, ad, ad_len);
 
-    // e: mix_hash(re.public)
-    noise_mix_hash(&state->symmetric, responder->ephemeral, NOISE_KEYLEN);
+    // e
+    noise_mix_hash(state, responder->ephemeral, NOISE_KEYLEN);
 
-    // ee: mix_key(dh(e,re))
-    u8 dh_ee[NOISE_DHLEN] = {0};
-    noise_dh(&state->e, responder->ephemeral, dh_ee);
-    noise_mix_key(&state->symmetric, dh_ee);
+    // ee
+    noise_mix_key_dh(state, &state->e, responder->ephemeral);
 
-    // se: mix_key(dh(s, re))
-    u8 dh_se[NOISE_DHLEN] = {0};
-    noise_dh(state->s, responder->ephemeral, dh_se);
-    noise_mix_key(&state->symmetric, dh_se);
+    // se
+    noise_mix_key_dh(state, state->s, responder->ephemeral);
 
-    return noise_decrypt_and_hash(&state->symmetric,
+    // payload
+    return noise_decrypt_and_hash(state,
                                   responder->encrypted_payload, NOISE_HANDSHAKE_PAYLOAD,
                                   responder->mac, payload);
 }
@@ -1565,9 +1566,9 @@ static void noise_responder_init(noise_handshake *state,
                                  noise_keypair *s)
 {
     state->s = s;
-    mem_copy(state->symmetric.h, noise_protocol_hash, NOISE_HASHLEN);
-    mem_copy(state->symmetric.ck, noise_protocol_hash, NOISE_HASHLEN);
-    noise_mix_hash(&state->symmetric, s->public, NOISE_KEYLEN);
+    mem_copy(state->symmetric_h, noise_protocol_hash, NOISE_HASHLEN);
+    mem_copy(state->symmetric_ck, noise_protocol_hash, NOISE_HASHLEN);
+    noise_mix_hash(state, s->public, NOISE_KEYLEN);
 }
 
 
@@ -1576,31 +1577,27 @@ static u32 noise_initiator_read(noise_handshake *state,
                                 const void *ad, const u32 ad_len,
                                 u8 *payload)
 {
-    noise_mix_hash(&state->symmetric, ad, ad_len);
+    noise_mix_hash(state, ad, ad_len);
 
     // e
     mem_copy(state->re, initiator->ephemeral, NOISE_KEYLEN);
-    noise_mix_hash(&state->symmetric, state->re, NOISE_KEYLEN);
+    noise_mix_hash(state, state->re, NOISE_KEYLEN);
 
     // es
-    u8 dh_es[NOISE_DHLEN] = {0};
-    noise_dh(state->s, state->re, dh_es);
-    noise_mix_key(&state->symmetric, dh_es);
+    noise_mix_key_dh(state, state->s, state->re);
 
     // s
-    if (noise_decrypt_and_hash(&state->symmetric,
-                               initiator->encrypted_static, NOISE_KEYLEN,
+    if (noise_decrypt_and_hash(state, initiator->encrypted_static, NOISE_KEYLEN,
                                initiator->mac1, state->rs))
     {
         return 1;
     }
 
     // ss
-    u8 dh_ss[NOISE_DHLEN] = {0};
-    noise_dh(state->s, state->rs, dh_ss);
-    noise_mix_key(&state->symmetric, dh_ss);
+    noise_mix_key_dh(state, state->s, state->rs);
 
-    return noise_decrypt_and_hash(&state->symmetric,
+    // payload
+    return noise_decrypt_and_hash(state,
                                   initiator->encrypted_payload, NOISE_HANDSHAKE_PAYLOAD,
                                   initiator->mac2, payload);
 }
@@ -1611,25 +1608,25 @@ static u32 noise_responder_write(noise_handshake *state,
                                  const void *ad, const u32 ad_len,
                                  const void *payload)
 {
-    noise_mix_hash(&state->symmetric, ad, ad_len);
+    noise_mix_hash(state, ad, ad_len);
 
-    // e: GENERATE_KEYPAIR(), append to buffer, mix_hash(e.public)
+    // e
     if (noise_keypair_generate(&state->e))
-    { return 1; }
-    noise_mix_hash(&state->symmetric, state->e.public, NOISE_KEYLEN);
+    {
+        return 1;
+    }
+
+    noise_mix_hash(state, state->e.public, NOISE_KEYLEN);
     mem_copy(responder->ephemeral, state->e.public, NOISE_KEYLEN);
 
-    // ee: mix_hash(dh(e, re))
-    u8 dh_ee[NOISE_DHLEN] = {0};
-    noise_dh(&state->e, state->re, dh_ee);
-    noise_mix_key(&state->symmetric, dh_ee);
+    // ee
+    noise_mix_key_dh(state, &state->e, state->re);
 
-    // se: mix_hash(dh(e, rs))
-    u8 dh_se[NOISE_DHLEN] = {0};
-    noise_dh(&state->e, state->rs, dh_se);
-    noise_mix_key(&state->symmetric, dh_se);
+    // se
+    noise_mix_key_dh(state, &state->e, state->rs);
 
-    noise_encrypt_and_hash(&state->symmetric,
+    // payload
+    noise_encrypt_and_hash(state,
                            payload, NOISE_HANDSHAKE_PAYLOAD,
                            responder->encrypted_payload, responder->mac);
     return 0;
@@ -2760,7 +2757,7 @@ static i32 event_net_request(main_context nmp, const u32 id, const nmp_sa *addr)
     }
 
     ctx->state = SESSION_STATUS_CONFIRM;
-    noise_split(&ctx->initiation.handshake.symmetric,
+    noise_split(&ctx->initiation.handshake,
                 ctx->noise_key_receive,
                 ctx->noise_key_send);
     return 0;
@@ -2808,7 +2805,7 @@ static u32 event_net_response(main_context nmp, session_context ctx, const u32 a
         {
             ctx->noise_counter_send = 0;
             ctx->noise_counter_receive = 0;
-            noise_split(&ctx->initiation.handshake.symmetric,
+            noise_split(&ctx->initiation.handshake,
                         ctx->noise_key_send,
                         ctx->noise_key_receive);
 
