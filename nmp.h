@@ -46,7 +46,6 @@ typedef enum
     NMP_CMD_RESPOND,
     NMP_CMD_DROP,
 
-    NMP_SESSION_ERR,        // todo
 
     // session stopped receiving any data
     // from remote peer, and is no longer active
@@ -80,6 +79,9 @@ typedef enum
     // 2^64 - 1 packets were sent over network
     NMP_SESSION_EXPIRED,
 
+    // remote peer violates protocol,
+    // session terminated
+    NMP_SESSION_ERR_PROTOCOL,
 
 } nmp_status;
 
@@ -114,6 +116,7 @@ typedef union
     uint8_t payload[NMP_INITIATION_PAYLOAD];
     uint64_t msg_id;
     uint32_t session_id;
+    nmp_sa addr;
 
 } nmp_status_container;
 

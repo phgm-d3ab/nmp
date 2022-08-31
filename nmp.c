@@ -618,9 +618,9 @@ static u32 local_send(const i32 soc,
  *
  */
 #define MSG_ALLOC_BLOCK 2048
-#define MSG_MASK_BITS   32
-#define MSG_MASK_INIT   UINT32_MAX
-#define MSG_WINDOW      32u
+#define MSG_MASK_BITS   64
+#define MSG_MASK_INIT   UINT64_MAX
+#define MSG_WINDOW      64
 #define MSG_TXQUEUE     NMP_QUEUE
 #define MSG_RXQUEUE     MSG_MASK_BITS
 #define MSG_PAYLOAD     (NMP_PAYLOAD_MAX + 16)
@@ -645,9 +645,8 @@ typedef struct
 typedef struct
 {
     u16 ack;
-    u16 pad1;
-    u32 ack_mask;
-    u64 pad2;
+    u16 pad[3];
+    u64 ack_mask;
 
 } msg_ack;
 
@@ -812,7 +811,7 @@ static u32 msg_queue(msg_state *ctx, const u8 *msg, const u16 len)
     assert(msg);
 
     // pre-increment: check one ahead
-    const u32 index = (ctx->tx_seq + 1) % MSG_TXQUEUE;
+    const u32 index = (ctx->tx_seq + 1) & (MSG_TXQUEUE - 1);
     msg_tx *entry = ctx->tx_queue + index;
 
     if (entry->status > MSG_TX_SENT)
@@ -1077,7 +1076,7 @@ static void msg_deliver_data(const msg_routines *cb,
  */
 static u32 msg_ack_assemble(const msg_state *ctx, msg_ack *ack)
 {
-    u32 mask = MSG_MASK_INIT;
+    u64 mask = MSG_MASK_INIT;
     u32 shift = 0;
     const u16 seq_hi = ctx->rx_seq;
     const u16 seq_lo = ctx->rx_delivered;
@@ -1103,9 +1102,10 @@ static u32 msg_ack_assemble(const msg_state *ctx, msg_ack *ack)
     }
 
     ack->ack = seq_hi;
-    ack->pad1 = 0;
+    ack->pad[0] = 0;
+    ack->pad[1] = 0;
+    ack->pad[2] = 0;
     ack->ack_mask = mask;
-    ack->pad2 = 0;
 
     return 1;
 }
@@ -1117,7 +1117,7 @@ static u32 msg_ack_assemble(const msg_state *ctx, msg_ack *ack)
 static i32 msg_ack_read(msg_state *ctx, const msg_ack *ack)
 {
     i32 discovered = 0;
-    u32 mask = ack->ack_mask;
+    u64 mask = ack->ack_mask;
 
 
     if (msg_sequence_cmp(ack->ack, ctx->tx_ack))
@@ -1222,7 +1222,7 @@ static i32 msg_deliver_ack(const msg_routines *cb, msg_state *ctx)
 #define NOISE_NONCE_MAX         UINT64_MAX
 #define NOISE_HANDSHAKE_PAYLOAD 128
 
-#define NOISE_COUNTER_WINDOW    96
+#define NOISE_COUNTER_WINDOW    224
 
 
 const char *noise_protocol_name = "Noise_IK_25519_ChaChaPoly_BLAKE2s";
@@ -1673,7 +1673,7 @@ static i32 noise_counter_validate(const u32 block[4],
         return -1;
     }
 
-    const i32 block_index = (i32) (remote / 32) & 3;
+    const i32 block_index = (i32) (remote / 32) & 7;
     if (remote <= local)
     {
         if (block[block_index] & (1 << (remote & 31)))
@@ -1810,7 +1810,7 @@ struct session
 
     u64 noise_counter_send;
     u64 noise_counter_receive;
-    u32 noise_counter_block[4];
+    u32 noise_counter_block[8];
     u8 noise_key_receive[NOISE_KEYLEN];
     u8 noise_key_send[NOISE_KEYLEN];
 
@@ -2050,17 +2050,18 @@ static i32 session_transport_receive(session_context ctx,
         return -1;
     }
 
+
     // only after successful decryption
     if (counter_remote > ctx->noise_counter_receive)
     {
         // start from local block, walk forward
         // zeroing out blocks in front
-        i32 i = (i32) (ctx->noise_counter_receive / 32) & 3;
+        i32 i = (i32) (ctx->noise_counter_receive / 32) & 7;
 
         while (i != block_index)
         {
             i += 1;
-            i &= 3;
+            i &= 7;
 
             ctx->noise_counter_block[i] = 0;
         }
@@ -2370,38 +2371,32 @@ static i32 event_local_new(main_context nmp,
     {
         log("rejecting connection request: wrong state %s %p",
             nmp_dbg_session_status[ctx_new->state], ctx_new);
-        goto fail;
+
+        return -1;
     }
 
     if (nmp->sessions.items >= NMP_SESSIONS)
     {
         log("rejecting connection request: MAXCONN");
 
-        session_drop(nmp, ctx_new, NMP_SESSION_MAX, NULL);
+        const nmp_status_container cancelled = {.session_id = ctx->session_id};
+        session_drop(nmp, ctx_new, NMP_SESSION_MAX, &cancelled);
         session_destroy(ctx_new);
         return 0;
     }
 
     if (hash_table_insert(&nmp->sessions, id_new, ctx_new))
     {
-        goto fail;
+        return -1;
     }
 
     if (session_request(nmp, ctx_new))
     {
-        goto fail;
+        return -1;
     }
 
     ctx_new->state = SESSION_STATUS_RESPONSE;
     return 0;
-
-
-    fail:
-    {
-        session_drop(nmp, ctx_new, NMP_SESSION_ERR, NULL);
-        session_destroy(ctx_new);
-        return -1;
-    }
 }
 
 
@@ -2608,7 +2603,7 @@ static i32 event_net_data(main_context nmp, session_context ctx, const u32 paylo
             // mark this session with critical error but
             // do not return -1 as this is not critical
             // for entire library, just drop this connection
-            session_drop(nmp, ctx, NMP_SESSION_ERR, NULL);
+            session_drop(nmp, ctx, NMP_SESSION_ERR_PROTOCOL, NULL);
             return 0;
         }
 
@@ -2643,14 +2638,14 @@ static u32 event_net_ack(main_context nmp, session_context ctx, const u32 payloa
         // but we cant read it, something is going on
         log("payload != sizeof(ack)");
 
-        session_drop(nmp, ctx, NMP_SESSION_ERR, NULL);
+        session_drop(nmp, ctx, NMP_SESSION_ERR_PROTOCOL, NULL);
         return 1;
     }
 
     // we only want WINDOW, ESTAB & ACKWAIT here
     if (ctx->state < SESSION_STATUS_WINDOW)
     {
-        log("rejecting new_context.state < SESSION_STATUS_ESTAB");
+        log("rejecting state %s", nmp_dbg_session_status[ctx->state]);
         return 0;
     }
 
@@ -2658,7 +2653,7 @@ static u32 event_net_ack(main_context nmp, session_context ctx, const u32 payloa
     const i32 acks = msg_ack_read(&ctx->transport, ack);
     if (acks < 0)
     {
-        session_drop(nmp, ctx, NMP_SESSION_ERR, NULL);
+        session_drop(nmp, ctx, NMP_SESSION_ERR_PROTOCOL, NULL);
         return 0;
     }
 
