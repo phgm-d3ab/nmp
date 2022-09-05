@@ -1218,6 +1218,7 @@ static i32 msg_deliver_ack(const msg_routines *cb, msg_state *ctx)
 #define NOISE_KEYLEN            32
 #define NOISE_HASHLEN           32
 #define NOISE_DHLEN             32
+#define NOISE_BLOCKLEN          64
 #define NOISE_AEAD_MAC          16
 #define NOISE_NONCE_MAX         UINT64_MAX
 #define NOISE_HANDSHAKE_PAYLOAD 128
@@ -1321,13 +1322,38 @@ static inline void noise_hash(const void *data, const u32 data_len,
 }
 
 
-static inline void noise_hmac_hash(const u8 *key,
+/*
+ *  https://en.wikipedia.org/wiki/HMAC
+ *  but only for NOISE_KEYLEN (32) byte keys
+ */
+static inline void noise_hmac_hash(const u8 key[NOISE_KEYLEN],
                                    const void *data, const u32 data_len,
-                                   u8 *output)
+                                   u8 output[NOISE_HASHLEN])
 {
-    blake2s(output, NOISE_HASHLEN,
-            key, NOISE_KEYLEN,
-            data, data_len);
+    u8 K_opad[NOISE_BLOCKLEN] = {0};
+    u8 K_ipad[NOISE_BLOCKLEN] = {0};
+
+    for (u32 i = 0; i < NOISE_KEYLEN; i++)
+    {
+        K_opad[i] ^= (key[i] ^ 0x5c);
+        K_opad[i + NOISE_KEYLEN] = 0x5c;
+
+        K_ipad[i] ^= (key[i] ^ 0x36);
+        K_ipad[i + NOISE_KEYLEN] = 0x36;
+    }
+
+    u8 hash_inner[NOISE_HASHLEN] = {0};
+    blake2s_ctx ctx_inner = {0};
+    blake2s_init(&ctx_inner, NOISE_HASHLEN, NULL, 0);
+    blake2s_update(&ctx_inner, K_ipad, NOISE_BLOCKLEN);
+    blake2s_update(&ctx_inner, data, data_len);
+    blake2s_final(&ctx_inner, hash_inner);
+
+    blake2s_ctx ctx_outer = {0};
+    blake2s_init(&ctx_outer, NOISE_HASHLEN, NULL, 0);
+    blake2s_update(&ctx_outer, K_opad, NOISE_BLOCKLEN);
+    blake2s_update(&ctx_outer, hash_inner, NOISE_HASHLEN);
+    blake2s_final(&ctx_outer, output);
 }
 
 
@@ -1444,24 +1470,11 @@ static void noise_mix_key(noise_handshake *state,
 static void noise_mix_hash(noise_handshake *state,
                            const void *data, const u32 data_len)
 {
-    assert(data_len <= 256);
-
-    // h || data
-    struct
-    {
-        u8 h[NOISE_HASHLEN];
-
-        // conservatively large buffer to fit
-        // everything we need
-        u8 data[256];
-
-    } buf = {0};
-
-    mem_copy(buf.h, state->symmetric_h, NOISE_HASHLEN);
-    mem_copy(buf.data, data, data_len);
-
-    noise_hash(&buf, (NOISE_HASHLEN + data_len),
-               state->symmetric_h);
+    blake2s_ctx ctx = {0};
+    blake2s_init(&ctx, NOISE_HASHLEN, NULL, 0);
+    blake2s_update(&ctx, state->symmetric_h, NOISE_HASHLEN);
+    blake2s_update(&ctx, data, data_len);
+    blake2s_final(&ctx, state->symmetric_h);
 }
 
 
