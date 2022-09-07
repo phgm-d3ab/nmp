@@ -1235,8 +1235,8 @@ const u8 noise_protocol_hash[] = {0xbb, 0xea, 0x02, 0x2b, 0x94, 0x8c, 0xf3, 0xbc
 
 typedef struct
 {
-    u8 ephemeral[NOISE_KEYLEN];
-    u8 encrypted_static[NOISE_KEYLEN];
+    u8 ephemeral[NOISE_DHLEN];
+    u8 encrypted_static[NOISE_DHLEN];
     u8 mac1[NOISE_AEAD_MAC];
     u8 encrypted_payload[NOISE_HANDSHAKE_PAYLOAD];
     u8 mac2[NOISE_AEAD_MAC];
@@ -1246,7 +1246,7 @@ typedef struct
 
 typedef struct
 {
-    u8 ephemeral[NOISE_KEYLEN];
+    u8 ephemeral[NOISE_DHLEN];
     u8 encrypted_payload[NOISE_HANDSHAKE_PAYLOAD];
     u8 mac[NOISE_AEAD_MAC];
 
@@ -1255,8 +1255,8 @@ typedef struct
 
 typedef struct
 {
-    u8 private[NOISE_KEYLEN];
-    u8 public[NOISE_KEYLEN];
+    u8 private[NOISE_DHLEN];
+    u8 public[NOISE_DHLEN];
 
 } noise_keypair;
 
@@ -1270,51 +1270,14 @@ typedef struct
 
     noise_keypair *s;
     noise_keypair e;
-    u8 rs[NOISE_KEYLEN];
-    u8 re[NOISE_KEYLEN];
+    u8 rs[NOISE_DHLEN];
+    u8 re[NOISE_DHLEN];
 
 } noise_handshake;
 
 
-static inline void noise_keypair_initialize(noise_keypair *pair)
-{
-    const u8 basepoint[32] = {9};
-
-    pair->private[0] &= 248;
-    pair->private[31] &= 127;
-    pair->private[31] |= 64;
-
-    curve25519_donna(pair->public,
-                     pair->private,
-                     basepoint);
-}
-
-
-static u32 noise_keypair_generate(noise_keypair *pair)
-{
-    struct
-    {
-        u8 rnd1[32];
-        u8 rnd2[32];
-
-    } buf = {0};
-
-    if (rnd_get(&buf, sizeof(buf)))
-    {
-        return 1;
-    }
-
-    blake2s(pair->private, NOISE_KEYLEN,
-            buf.rnd1, 32,
-            buf.rnd2, 32);
-
-    noise_keypair_initialize(pair);
-    return 0;
-}
-
-
 static inline void noise_hash(const void *data, const u32 data_len,
-                              u8 *output)
+                              u8 output[NOISE_HASHLEN])
 {
     blake2s(output, NOISE_HASHLEN,
             NULL, 0,
@@ -1357,10 +1320,11 @@ static inline void noise_hmac_hash(const u8 key[NOISE_KEYLEN],
 }
 
 
+// noise spec has third output, but it is not used
+// in this handshake pattern so not included here
 static void noise_hkdf(const u8 *ck, const u8 *ikm,
                        u8 *output1,
-                       u8 *output2,
-                       u8 *output3)
+                       u8 *output2)
 {
     const u8 byte_1 = 0x01;
     u8 temp_key[NOISE_KEYLEN] = {0};
@@ -1380,18 +1344,6 @@ static void noise_hkdf(const u8 *ck, const u8 *ikm,
     noise_hmac_hash(temp_key,
                     buf1, NOISE_HASHLEN + sizeof(u8),
                     output2);
-
-    if (output3 == NULL)
-    {
-        return;
-    }
-
-    u8 buf2[40] = {0};
-    mem_copy(buf2, output2, NOISE_HASHLEN);
-    buf2[NOISE_HASHLEN] = 0x03; // h || byte(0x03)
-    noise_hmac_hash(temp_key,
-                    buf2, NOISE_HASHLEN + sizeof(u8),
-                    output3);
 }
 
 
@@ -1404,6 +1356,34 @@ static inline void noise_dh(const noise_keypair *key_pair,
                      key_pair->private,
                      public_key);
     noise_hash(temp, NOISE_DHLEN, shared_secret);
+}
+
+
+static inline void noise_keypair_initialize(noise_keypair *pair)
+{
+    const u8 basepoint[32] = {9};
+
+    pair->private[0] &= 248;
+    pair->private[31] &= 127;
+    pair->private[31] |= 64;
+
+    curve25519_donna(pair->public,
+                     pair->private,
+                     basepoint);
+}
+
+
+static u32 noise_keypair_generate(noise_keypair *pair)
+{
+    u8 buf[64] = {0};
+    if (rnd_get(&buf, sizeof(buf)))
+    {
+        return 1;
+    }
+
+    noise_hash(buf, 64, pair->private);
+    noise_keypair_initialize(pair);
+    return 0;
 }
 
 
@@ -1423,6 +1403,7 @@ static inline void noise_chacha20_nonce(const u64 counter, u8 output[12])
     output[11] = (u8) (counter >> 56);
 }
 
+
 static inline void noise_encrypt(const u8 *k, const u64 n,
                                  const void *ad, const u32 ad_len,
                                  const void *plaintext, const u32 plaintext_len,
@@ -1436,6 +1417,7 @@ static inline void noise_encrypt(const u8 *k, const u64 n,
                               plaintext, plaintext_len,
                               ciphertext, mac);
 }
+
 
 static inline u32 noise_decrypt(const u8 *k, const u64 n,
                                 const void *ad, const u32 ad_len,
@@ -1460,12 +1442,12 @@ static void noise_mix_key(noise_handshake *state,
 
     noise_hkdf(temp_ck, ikm,
                state->symmetric_ck,
-               state->cipher_k,
-               NULL);
+               state->cipher_k);
 
     // one of hkdf outputs is our 'temp_k'
     // which effectively does initialize_key(temp_k)
 }
+
 
 static void noise_mix_hash(noise_handshake *state,
                            const void *data, const u32 data_len)
@@ -1517,12 +1499,11 @@ static u32 noise_decrypt_and_hash(noise_handshake *state,
 }
 
 
-static void noise_split(const noise_handshake *state, u8 *c1, u8 *c2)
+static void noise_split(const noise_handshake *state,
+                        u8 *c1, u8 *c2)
 {
     noise_hkdf(state->symmetric_ck, NULL, // 'zerolen'
-               c1,
-               c2,
-               NULL);
+               c1, c2);
 }
 
 
@@ -1554,7 +1535,7 @@ static u32 noise_initiator_write(noise_handshake *state,
         return 1;
     }
 
-    noise_mix_hash(state, state->e.public, NOISE_KEYLEN);
+    noise_mix_hash(state, state->e.public, NOISE_DHLEN);
     mem_copy(initiator->ephemeral, state->e.public, NOISE_KEYLEN);
 
     // es
@@ -1562,7 +1543,7 @@ static u32 noise_initiator_write(noise_handshake *state,
 
     // s
     noise_encrypt_and_hash(state,
-                           state->s->public, NOISE_KEYLEN,
+                           state->s->public, NOISE_DHLEN,
                            initiator->encrypted_static,
                            initiator->mac1);
 
@@ -1585,7 +1566,7 @@ static u32 noise_responder_read(noise_handshake *state,
     noise_mix_hash(state, ad, ad_len);
 
     // e
-    noise_mix_hash(state, responder->ephemeral, NOISE_KEYLEN);
+    noise_mix_hash(state, responder->ephemeral, NOISE_DHLEN);
 
     // ee
     noise_mix_key_dh(state, &state->e, responder->ephemeral);
@@ -1606,7 +1587,7 @@ static void noise_responder_init(noise_handshake *state,
     state->s = s;
     mem_copy(state->symmetric_h, noise_protocol_hash, NOISE_HASHLEN);
     mem_copy(state->symmetric_ck, noise_protocol_hash, NOISE_HASHLEN);
-    noise_mix_hash(state, s->public, NOISE_KEYLEN);
+    noise_mix_hash(state, s->public, NOISE_DHLEN);
 }
 
 
@@ -1618,14 +1599,14 @@ static u32 noise_initiator_read(noise_handshake *state,
     noise_mix_hash(state, ad, ad_len);
 
     // e
-    mem_copy(state->re, initiator->ephemeral, NOISE_KEYLEN);
-    noise_mix_hash(state, state->re, NOISE_KEYLEN);
+    mem_copy(state->re, initiator->ephemeral, NOISE_DHLEN);
+    noise_mix_hash(state, state->re, NOISE_DHLEN);
 
     // es
     noise_mix_key_dh(state, state->s, state->re);
 
     // s
-    if (noise_decrypt_and_hash(state, initiator->encrypted_static, NOISE_KEYLEN,
+    if (noise_decrypt_and_hash(state, initiator->encrypted_static, NOISE_DHLEN,
                                initiator->mac1, state->rs))
     {
         return 1;
@@ -1654,8 +1635,8 @@ static u32 noise_responder_write(noise_handshake *state,
         return 1;
     }
 
-    noise_mix_hash(state, state->e.public, NOISE_KEYLEN);
-    mem_copy(responder->ephemeral, state->e.public, NOISE_KEYLEN);
+    noise_mix_hash(state, state->e.public, NOISE_DHLEN);
+    mem_copy(responder->ephemeral, state->e.public, NOISE_DHLEN);
 
     // ee
     noise_mix_key_dh(state, &state->e, state->re);
@@ -1671,7 +1652,7 @@ static u32 noise_responder_write(noise_handshake *state,
 }
 
 
-static i32 noise_counter_validate(const u32 block[4],
+static i32 noise_counter_validate(const u32 block[8],
                                   const u64 local,
                                   const u64 remote)
 {
@@ -1728,6 +1709,12 @@ static i32 noise_counter_validate(const u32 block[4],
 #define callback(call_, ...) ({ if (call_) { call_(__VA_ARGS__); } \
                             else { log("skipping empty %s", #call_); }})
 
+#define header_initialize(type_, id_) (nmp_header) { \
+                        .type = (type_),             \
+                        .pad[0] = 0,                 \
+                        .pad[1] = 0,                 \
+                        .pad[2] = 0,                 \
+                        .session_id = (id_)}
 
 static_assert(NMP_KEYLEN == NOISE_KEYLEN, "keylen");
 
@@ -1877,22 +1864,6 @@ struct nmp_data
     hash_table sessions;
     noise_handshake responder_precomp;
 };
-
-
-static inline nmp_header header_initialize(const u8 type,
-                                           const u32 id)
-{
-    const nmp_header header =
-            {
-                    .type = type,
-                    .pad[0] = 0,
-                    .pad[1] = 0,
-                    .pad[2] = 0,
-                    .session_id = id,
-            };
-
-    return header;
-}
 
 
 static session_context session_new(const i32 epoll_fd)
