@@ -14,6 +14,7 @@ endif ()
 
 add_library(nmp ${LIB_TYPE} nmp.c)
 target_link_libraries(nmp
+        uring
         blake2s
         chacha20_poly1305
         curve25519_donna)
