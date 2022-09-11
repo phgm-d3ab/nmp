@@ -1566,10 +1566,6 @@ static i32 noise_counter_validate(const u32 block[8],
 #define RING_NET_GROUP              0
 #define RING_LOCAL_GROUP            1
 
-#define RING_CQ_NET                 0
-#define RING_CQ_LOCAL               1
-#define RING_CQ_SEND                2
-
 
 #define header_initialize(type_, id_) (nmp_header) { \
                         .type = (type_),             \
@@ -1674,6 +1670,7 @@ struct session
     nmp_sa addr;
     u64 stat_tx;
     u64 stat_rx;
+    struct __kernel_timespec kts;
 
     union
     {
@@ -1720,6 +1717,14 @@ struct nmp_local_request
         u8 *payload_data;
         void *payload_ptr;
     };
+};
+
+
+enum nmp_cqe_mark
+{
+    RING_CQ_NET = 0,
+    RING_CQ_LOCAL = 1,
+    RING_CQ_SEND = 2,
 };
 
 
@@ -1783,6 +1788,8 @@ static inline struct nmp_buf_send *nmp_ring_send_buf(struct nmp_data *nmp,
                                                      struct session *owner)
 {
     nmp->send_iterator += 1;
+    nmp->send_iterator &= (RING_SEND_BUFFERS - 1);
+
     nmp->send_buffers[nmp->send_iterator].owner = owner;
     return &nmp->send_buffers[nmp->send_iterator];
 }
@@ -3557,6 +3564,8 @@ u32 nmp_run(struct nmp_data *nmp, const i32 timeout)
         const i32 submitted = io_uring_submit_and_wait(&nmp->ring, 1);
         if (submitted < 0)
         {
+            log("wait interrupted: %s", strerrorname_np(-submitted));
+
             // -errno
             switch (-submitted)
             {
@@ -3584,8 +3593,26 @@ u32 nmp_run(struct nmp_data *nmp, const i32 timeout)
         {
             if (cqes[i]->res < 0)
             {
-                log("cqe error %s", strerrorname_np(-cqes[i]->res));
-                return 1;
+                log("cqe status %s", strerrorname_np(-cqes[i]->res));
+                u32 crit = 0;
+
+                switch (-cqes[i]->res)
+                {
+                    case ETIME:
+                        crit = event_timer(nmp, io_uring_cqe_get_data(cqes[i]));
+                        break;
+
+                    case EPERM: // todo
+                        break;
+
+                    default:
+                        return 1;
+                }
+
+                if (crit)
+                    return 1;
+
+                continue;
             }
 
             struct session *ctx = NULL;
@@ -3600,12 +3627,6 @@ u32 nmp_run(struct nmp_data *nmp, const i32 timeout)
                 case RING_CQ_LOCAL:
                     result = event_local(nmp, cqes[i], &ctx);
                     break;
-
-                case RING_CQ_SEND: // todo
-                    break;
-
-                default:
-                    result = event_timer(nmp, io_uring_cqe_get_data(cqes[i]));
             }
 
             switch (result)
