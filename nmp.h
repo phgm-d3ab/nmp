@@ -13,7 +13,7 @@ typedef struct nmp_data nmp_t;
 
 
 // byte length of keys (both private and public)
-#define NMP_KEYLEN              32
+#define NMP_KEYLEN              56
 
 // how many messages can we queue for sending
 #define NMP_QUEUE               256
@@ -29,7 +29,7 @@ typedef struct nmp_data nmp_t;
 
 // maximum size of application defined payload
 // included with requests and responses
-#define NMP_INITIATION_PAYLOAD     120
+#define NMP_INITIATION_PAYLOAD  120
 
 // verify that the address we send to matches
 // address we receive from

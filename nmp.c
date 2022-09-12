@@ -1064,9 +1064,8 @@ static i32 msg_deliver_ack(const msg_routines *cb, msg_state *ctx)
  *   <- e, ee, se
  */
 #define NOISE_KEYLEN            32
-#define NOISE_HASHLEN           32
-#define NOISE_DHLEN             32
-#define NOISE_BLOCKLEN          64
+#define NOISE_HASHLEN           64
+#define NOISE_DHLEN             56
 #define NOISE_AEAD_MAC          16
 #define NOISE_NONCE_MAX         UINT64_MAX
 #define NOISE_HANDSHAKE_PAYLOAD 128
@@ -1074,13 +1073,18 @@ static i32 msg_deliver_ack(const msg_routines *cb, msg_state *ctx)
 #define NOISE_COUNTER_WINDOW    224
 
 
-const char *noise_protocol_name = "Noise_IK_25519_ChaChaPoly_BLAKE2s";
-const u8 noise_protocol_hash[] =
+// "Noise_IK_448_ChaChaPoly_BLAKE2b" padded
+// with zeros to be NOISE_HASHLEN long
+const u8 noise_protocol_name[NOISE_HASHLEN] =
         {
-                0xbb, 0xea, 0x02, 0x2b, 0x94, 0x8c, 0xf3, 0xbc,
-                0x58, 0x57, 0xd7, 0x08, 0x04, 0x22, 0x91, 0x79,
-                0xe1, 0x11, 0x6b, 0xc4, 0x0c, 0xb8, 0xcc, 0x07,
-                0x48, 0x35, 0x34, 0x9c, 0x46, 0x4b, 0xca, 0x36
+                0x4e, 0x6f, 0x69, 0x73, 0x65, 0x5f, 0x49, 0x4b,
+                0x5f, 0x34, 0x34, 0x38, 0x5f, 0x43, 0x68, 0x61,
+                0x43, 0x68, 0x61, 0x50, 0x6f, 0x6c, 0x79, 0x5f,
+                0x42, 0x4c, 0x41, 0x4b, 0x45, 0x32, 0x62, 0x00,
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         };
 
 
@@ -1132,23 +1136,19 @@ static inline void noise_hash(const void *data, const u32 data_len,
 {
     u32 md_len = NOISE_HASHLEN;
     EVP_MD_CTX *md = EVP_MD_CTX_new();
-    EVP_DigestInit(md, EVP_blake2s256());
+    EVP_DigestInit(md, EVP_blake2b512());
     EVP_DigestUpdate(md, data, data_len);
     EVP_DigestFinal(md, output, &md_len);
     EVP_MD_CTX_free(md);
 }
 
 
-/*
- *  https://en.wikipedia.org/wiki/HMAC
- *  but only for NOISE_KEYLEN (32) byte keys
- */
 static inline void noise_hmac_hash(const u8 key[NOISE_KEYLEN],
                                    const void *data, const u32 data_len,
                                    u8 output[NOISE_HASHLEN])
 {
     u32 md_len = NOISE_HASHLEN;
-    HMAC(EVP_blake2s256(), key, NOISE_KEYLEN,
+    HMAC(EVP_blake2b512(), key, NOISE_KEYLEN,
          data, data_len,
          output, &md_len);
 }
@@ -1157,11 +1157,11 @@ static inline void noise_hmac_hash(const u8 key[NOISE_KEYLEN],
 // noise spec has third output, but it is not used
 // in this handshake pattern so not included here
 static void noise_hkdf(const u8 *ck, const u8 *ikm,
-                       u8 *output1,
-                       u8 *output2)
+                       u8 output1[NOISE_HASHLEN],
+                       u8 output2[NOISE_HASHLEN])
 {
     const u8 byte_1 = 0x01;
-    u8 temp_key[NOISE_KEYLEN] = {0};
+    u8 temp_key[NOISE_HASHLEN] = {0};
     noise_hmac_hash(ck, ikm,
                     ikm ? NOISE_KEYLEN : 0, temp_key);
 
@@ -1169,25 +1169,25 @@ static void noise_hkdf(const u8 *ck, const u8 *ikm,
                     &byte_1, sizeof(u8),
                     output1);
 
-    u8 buf1[40] = {0};
-    mem_copy(buf1, output1, NOISE_HASHLEN);
-    buf1[NOISE_HASHLEN] = 0x02; // h || byte(0x02)
+    u8 buf2[NOISE_HASHLEN + 8] = {0};
+    mem_copy(buf2, output1, NOISE_HASHLEN);
+    buf2[NOISE_HASHLEN] = 0x02; // h || byte(0x02)
     noise_hmac_hash(temp_key,
-                    buf1, NOISE_HASHLEN + sizeof(u8),
+                    buf2, NOISE_HASHLEN + sizeof(u8),
                     output2);
 }
 
 
 static inline void noise_dh(const noise_keypair *key_pair,
                             const u8 *public_key,
-                            u8 *shared_secret)
+                            u8 shared_secret[NOISE_DHLEN])
 {
     u64 dhlen = NOISE_DHLEN;
     u8 temp[NOISE_DHLEN] = {0};
-    EVP_PKEY *private = EVP_PKEY_new_raw_private_key(EVP_PKEY_X25519, NULL,
-                                                     key_pair->private, NOISE_KEYLEN);
-    EVP_PKEY *remote_pub = EVP_PKEY_new_raw_public_key(EVP_PKEY_X25519, NULL,
-                                                       public_key, NOISE_KEYLEN);
+    EVP_PKEY *private = EVP_PKEY_new_raw_private_key(EVP_PKEY_X448, NULL,
+                                                     key_pair->private, NOISE_DHLEN);
+    EVP_PKEY *remote_pub = EVP_PKEY_new_raw_public_key(EVP_PKEY_X448, NULL,
+                                                       public_key, NOISE_DHLEN);
     EVP_PKEY_CTX *dh = EVP_PKEY_CTX_new(private, NULL);
     EVP_PKEY_derive_init(dh);
     EVP_PKEY_derive_set_peer(dh, remote_pub);
@@ -1197,15 +1197,19 @@ static inline void noise_dh(const noise_keypair *key_pair,
     EVP_PKEY_free(remote_pub);
     EVP_PKEY_free(private);
 
-    noise_hash(temp, NOISE_DHLEN, shared_secret);
+    u8 temp_dh[NOISE_HASHLEN] = {0};
+    noise_hash(temp, NOISE_DHLEN, temp_dh);
+
+    // discard some bytes
+    mem_copy(shared_secret, temp_dh, NOISE_DHLEN);
 }
 
 
 static inline void noise_keypair_initialize(noise_keypair *pair)
 {
-    u64 keylen = NOISE_KEYLEN;
-    EVP_PKEY *key = EVP_PKEY_new_raw_private_key(EVP_PKEY_X25519, NULL,
-                                                 pair->private, NOISE_KEYLEN);
+    u64 keylen = NOISE_DHLEN;
+    EVP_PKEY *key = EVP_PKEY_new_raw_private_key(EVP_PKEY_X448, NULL,
+                                                 pair->private, NOISE_DHLEN);
     EVP_PKEY_get_raw_public_key(key, pair->public, &keylen);
     EVP_PKEY_free(key);
 }
@@ -1213,13 +1217,16 @@ static inline void noise_keypair_initialize(noise_keypair *pair)
 
 static u32 noise_keypair_generate(noise_keypair *pair)
 {
-    u8 buf[64] = {0};
+    u8 buf[NOISE_HASHLEN] = {0};
     if (rnd_get(&buf, sizeof(buf)))
     {
         return 1;
     }
 
-    noise_hash(buf, 64, pair->private);
+    u8 hash[NOISE_HASHLEN] = {0};
+    noise_hash(buf, NOISE_HASHLEN, hash);
+    mem_copy(pair->private, hash, NOISE_DHLEN);
+
     noise_keypair_initialize(pair);
     return 0;
 }
@@ -1285,12 +1292,14 @@ static inline u32 noise_decrypt(const u8 *k, const u64 n,
 static void noise_mix_key(noise_handshake *state,
                           const u8 *ikm)
 {
+    u8 temp_k[NOISE_HASHLEN] = {0};
+
     noise_hkdf(state->symmetric_ck, ikm,
                state->symmetric_ck,
-               state->cipher_k);
+               temp_k);
 
-    // one of hkdf outputs is our 'temp_k'
-    // which effectively does initialize_key(temp_k)
+    // initialize_key(temp_k), truncated
+    mem_copy(state->cipher_k, temp_k, NOISE_KEYLEN);
 }
 
 
@@ -1299,7 +1308,7 @@ static void noise_mix_hash(noise_handshake *state,
 {
     u32 md_len = NOISE_HASHLEN;
     EVP_MD_CTX *md = EVP_MD_CTX_new();
-    EVP_DigestInit(md, EVP_blake2s256());
+    EVP_DigestInit(md, EVP_blake2b512());
     EVP_DigestUpdate(md, state->symmetric_h, NOISE_HASHLEN);
     EVP_DigestUpdate(md, data, data_len);
     EVP_DigestFinal(md, state->symmetric_h, &md_len);
@@ -1349,8 +1358,14 @@ static u32 noise_decrypt_and_hash(noise_handshake *state,
 static void noise_split(const noise_handshake *state,
                         u8 *c1, u8 *c2)
 {
+    u8 temp_k1[NOISE_HASHLEN] = {0};
+    u8 temp_k2[NOISE_HASHLEN] = {0};
+
     noise_hkdf(state->symmetric_ck, NULL, // 'zerolen'
-               c1, c2);
+               temp_k1, temp_k2);
+
+    mem_copy(c1, temp_k1, NOISE_KEYLEN);
+    mem_copy(c2, temp_k2, NOISE_KEYLEN);
 }
 
 
@@ -1358,14 +1373,12 @@ static void noise_initiator_init(noise_handshake *state,
                                  noise_keypair *s,
                                  const u8 *rs)
 {
-    UNUSED(noise_protocol_name);
-    // instead of h = HASH(protocol_name) use precomputed value
-    mem_copy(state->symmetric_h, noise_protocol_hash, NOISE_HASHLEN);
-    mem_copy(state->symmetric_ck, noise_protocol_hash, NOISE_HASHLEN);
+    mem_copy(state->symmetric_h, noise_protocol_name, NOISE_HASHLEN);
+    mem_copy(state->symmetric_ck, noise_protocol_name, NOISE_HASHLEN);
 
     state->s = s;
-    mem_copy(state->rs, rs, NOISE_KEYLEN);
-    noise_mix_hash(state, rs, NOISE_KEYLEN);
+    mem_copy(state->rs, rs, NOISE_DHLEN);
+    noise_mix_hash(state, rs, NOISE_DHLEN);
 }
 
 
@@ -1383,7 +1396,7 @@ static u32 noise_initiator_write(noise_handshake *state,
     }
 
     noise_mix_hash(state, state->e.public, NOISE_DHLEN);
-    mem_copy(initiator->ephemeral, state->e.public, NOISE_KEYLEN);
+    mem_copy(initiator->ephemeral, state->e.public, NOISE_DHLEN);
 
     // es
     noise_mix_key_dh(state, &state->e, state->rs);
@@ -1432,8 +1445,8 @@ static void noise_responder_init(noise_handshake *state,
                                  noise_keypair *s)
 {
     state->s = s;
-    mem_copy(state->symmetric_h, noise_protocol_hash, NOISE_HASHLEN);
-    mem_copy(state->symmetric_ck, noise_protocol_hash, NOISE_HASHLEN);
+    mem_copy(state->symmetric_h, noise_protocol_name, NOISE_HASHLEN);
+    mem_copy(state->symmetric_ck, noise_protocol_name, NOISE_HASHLEN);
     noise_mix_hash(state, s->public, NOISE_DHLEN);
 }
 
@@ -1944,6 +1957,9 @@ static u32 nmp_ring_setup_local(struct io_uring *ring,
 static u32 nmp_ring_timer_update(struct nmp_data *nmp,
                                  struct session *ctx, const u32 value)
 {
+    UNUSED(nmp);
+    UNUSED(ctx);
+    UNUSED(value);
     return 0;
 }
 
@@ -1951,6 +1967,10 @@ static u32 nmp_ring_timer_update(struct nmp_data *nmp,
 static u32 nmp_ring_timer_set(struct nmp_data *nmp,
                               struct session *ctx, const u32 value)
 {
+    UNUSED(nmp);
+    UNUSED(ctx);
+    UNUSED(value);
+
     return 0;
 }
 
