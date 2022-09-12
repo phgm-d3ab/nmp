@@ -13,11 +13,7 @@ if ($ENV{NMP_SHARED})
 endif ()
 
 add_library(nmp ${LIB_TYPE} nmp.c)
-target_link_libraries(nmp
-        uring
-        blake2s
-        chacha20_poly1305
-        curve25519_donna)
+target_link_libraries(nmp uring crypto)
 
 target_include_directories(${PROJECT_NAME} PRIVATE include)
 target_include_directories(${PROJECT_NAME} PUBLIC ${PROJECT_SOURCE_DIR})

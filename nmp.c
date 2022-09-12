@@ -3,10 +3,6 @@
  */
 #include "nmp.h"
 
-#include "chacha20_poly1305.h" // https://github.com/phgm-d3ab/chacha20_poly1305
-#include "curve25519-donna.h"  // https://github.com/phgm-d3ab/curve25519-donna
-#include "blake2s.h"           // https://github.com/phgm-d3ab/blake2
-
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
@@ -19,6 +15,9 @@
 #include <sys/random.h>
 
 #include <liburing.h>
+#include <openssl/evperr.h>
+#include <openssl/evp.h>
+#include <openssl/hmac.h>
 
 
 typedef uint8_t u8;
@@ -1131,9 +1130,12 @@ typedef struct
 static inline void noise_hash(const void *data, const u32 data_len,
                               u8 output[NOISE_HASHLEN])
 {
-    blake2s(output, NOISE_HASHLEN,
-            NULL, 0,
-            data, data_len);
+    u32 md_len = NOISE_HASHLEN;
+    EVP_MD_CTX *md = EVP_MD_CTX_new();
+    EVP_DigestInit(md, EVP_blake2s256());
+    EVP_DigestUpdate(md, data, data_len);
+    EVP_DigestFinal(md, output, &md_len);
+    EVP_MD_CTX_free(md);
 }
 
 
@@ -1145,30 +1147,10 @@ static inline void noise_hmac_hash(const u8 key[NOISE_KEYLEN],
                                    const void *data, const u32 data_len,
                                    u8 output[NOISE_HASHLEN])
 {
-    u8 K_opad[NOISE_BLOCKLEN] = {0};
-    u8 K_ipad[NOISE_BLOCKLEN] = {0};
-
-    for (u32 i = 0; i < NOISE_KEYLEN; i++)
-    {
-        K_opad[i] ^= (key[i] ^ 0x5c);
-        K_opad[i + NOISE_KEYLEN] = 0x5c;
-
-        K_ipad[i] ^= (key[i] ^ 0x36);
-        K_ipad[i + NOISE_KEYLEN] = 0x36;
-    }
-
-    u8 hash_inner[NOISE_HASHLEN] = {0};
-    blake2s_ctx ctx_inner = {0};
-    blake2s_init(&ctx_inner, NOISE_HASHLEN, NULL, 0);
-    blake2s_update(&ctx_inner, K_ipad, NOISE_BLOCKLEN);
-    blake2s_update(&ctx_inner, data, data_len);
-    blake2s_final(&ctx_inner, hash_inner);
-
-    blake2s_ctx ctx_outer = {0};
-    blake2s_init(&ctx_outer, NOISE_HASHLEN, NULL, 0);
-    blake2s_update(&ctx_outer, K_opad, NOISE_BLOCKLEN);
-    blake2s_update(&ctx_outer, hash_inner, NOISE_HASHLEN);
-    blake2s_final(&ctx_outer, output);
+    u32 md_len = NOISE_HASHLEN;
+    HMAC(EVP_blake2s256(), key, NOISE_KEYLEN,
+         data, data_len,
+         output, &md_len);
 }
 
 
@@ -1180,11 +1162,8 @@ static void noise_hkdf(const u8 *ck, const u8 *ikm,
 {
     const u8 byte_1 = 0x01;
     u8 temp_key[NOISE_KEYLEN] = {0};
-    noise_hmac_hash(ck,
-            // necessary to avoid null pointer exception
-            // when passing 'zerolen' (current blake2s version)
-                    ikm, ikm ? NOISE_KEYLEN : 0,
-                    temp_key);
+    noise_hmac_hash(ck, ikm,
+                    ikm ? NOISE_KEYLEN : 0, temp_key);
 
     noise_hmac_hash(temp_key,
                     &byte_1, sizeof(u8),
@@ -1203,25 +1182,32 @@ static inline void noise_dh(const noise_keypair *key_pair,
                             const u8 *public_key,
                             u8 *shared_secret)
 {
+    u64 dhlen = NOISE_DHLEN;
     u8 temp[NOISE_DHLEN] = {0};
-    curve25519_donna(temp,
-                     key_pair->private,
-                     public_key);
+    EVP_PKEY *private = EVP_PKEY_new_raw_private_key(EVP_PKEY_X25519, NULL,
+                                                     key_pair->private, NOISE_KEYLEN);
+    EVP_PKEY *remote_pub = EVP_PKEY_new_raw_public_key(EVP_PKEY_X25519, NULL,
+                                                       public_key, NOISE_KEYLEN);
+    EVP_PKEY_CTX *dh = EVP_PKEY_CTX_new(private, NULL);
+    EVP_PKEY_derive_init(dh);
+    EVP_PKEY_derive_set_peer(dh, remote_pub);
+    EVP_PKEY_derive(dh, temp, &dhlen);
+
+    EVP_PKEY_CTX_free(dh);
+    EVP_PKEY_free(remote_pub);
+    EVP_PKEY_free(private);
+
     noise_hash(temp, NOISE_DHLEN, shared_secret);
 }
 
 
 static inline void noise_keypair_initialize(noise_keypair *pair)
 {
-    const u8 basepoint[32] = {9};
-
-    pair->private[0] &= 248;
-    pair->private[31] &= 127;
-    pair->private[31] |= 64;
-
-    curve25519_donna(pair->public,
-                     pair->private,
-                     basepoint);
+    u64 keylen = NOISE_KEYLEN;
+    EVP_PKEY *key = EVP_PKEY_new_raw_private_key(EVP_PKEY_X25519, NULL,
+                                                 pair->private, NOISE_KEYLEN);
+    EVP_PKEY_get_raw_public_key(key, pair->public, &keylen);
+    EVP_PKEY_free(key);
 }
 
 
@@ -1261,13 +1247,17 @@ static inline void noise_encrypt(const u8 *k, const u64 n,
                                  const void *plaintext, const u32 plaintext_len,
                                  u8 *ciphertext, u8 *mac)
 {
+    i32 output_len = 0;
     u8 nonce[12];
     noise_chacha20_nonce(n, nonce);
 
-    chacha20_poly1305_encrypt(k, nonce,
-                              ad, ad_len,
-                              plaintext, plaintext_len,
-                              ciphertext, mac);
+    EVP_CIPHER_CTX *cipher = EVP_CIPHER_CTX_new();
+    EVP_EncryptInit(cipher, EVP_chacha20_poly1305(), k, nonce);
+    EVP_EncryptUpdate(cipher, NULL, &output_len, ad, (int) ad_len);
+    EVP_EncryptUpdate(cipher, ciphertext, &output_len, plaintext, (i32) plaintext_len);
+    EVP_EncryptFinal(cipher, ciphertext + output_len, &output_len);
+    EVP_CIPHER_CTX_ctrl(cipher, EVP_CTRL_AEAD_GET_TAG, NOISE_AEAD_MAC, mac);
+    EVP_CIPHER_CTX_free(cipher);
 }
 
 
@@ -1276,23 +1266,26 @@ static inline u32 noise_decrypt(const u8 *k, const u64 n,
                                 const u8 *ciphertext, const u32 ciphertext_len,
                                 const u8 *mac, void *plaintext)
 {
+    i32 output_len = 0;
     u8 nonce[12];
     noise_chacha20_nonce(n, nonce);
 
-    return chacha20_poly1305_decrypt(k, nonce,
-                                     ad, ad_len,
-                                     ciphertext, ciphertext_len,
-                                     mac, plaintext);
+    EVP_CIPHER_CTX *cipher = EVP_CIPHER_CTX_new();
+    EVP_DecryptInit(cipher, EVP_chacha20_poly1305(), k, nonce);
+    EVP_DecryptUpdate(cipher, NULL, &output_len, ad, (int) ad_len);
+    EVP_DecryptUpdate(cipher, plaintext, &output_len, ciphertext, (i32) ciphertext_len);
+    EVP_CIPHER_CTX_ctrl(cipher, EVP_CTRL_AEAD_SET_TAG, NOISE_AEAD_MAC, mac);
+    const int result = EVP_DecryptFinal(cipher, plaintext + output_len, &output_len);
+    EVP_CIPHER_CTX_free(cipher);
+
+    return (result <= 0);
 }
 
 
 static void noise_mix_key(noise_handshake *state,
                           const u8 *ikm)
 {
-    u8 temp_ck[NOISE_KEYLEN];
-    mem_copy(temp_ck, state->symmetric_ck, NOISE_KEYLEN);
-
-    noise_hkdf(temp_ck, ikm,
+    noise_hkdf(state->symmetric_ck, ikm,
                state->symmetric_ck,
                state->cipher_k);
 
@@ -1304,11 +1297,13 @@ static void noise_mix_key(noise_handshake *state,
 static void noise_mix_hash(noise_handshake *state,
                            const void *data, const u32 data_len)
 {
-    blake2s_ctx ctx = {0};
-    blake2s_init(&ctx, NOISE_HASHLEN, NULL, 0);
-    blake2s_update(&ctx, state->symmetric_h, NOISE_HASHLEN);
-    blake2s_update(&ctx, data, data_len);
-    blake2s_final(&ctx, state->symmetric_h);
+    u32 md_len = NOISE_HASHLEN;
+    EVP_MD_CTX *md = EVP_MD_CTX_new();
+    EVP_DigestInit(md, EVP_blake2s256());
+    EVP_DigestUpdate(md, state->symmetric_h, NOISE_HASHLEN);
+    EVP_DigestUpdate(md, data, data_len);
+    EVP_DigestFinal(md, state->symmetric_h, &md_len);
+    EVP_MD_CTX_free(md);
 }
 
 
@@ -1604,14 +1599,10 @@ typedef struct
 
 typedef struct
 {
-    struct
-    {
-        nmp_header type_pad_id;
-        u64 counter;
+    nmp_header type_pad_id;
+    u64 counter;
 
-    } header;
-
-    u8 payload[0];
+    // u8 ciphertext[..];
     // u8 mac[16];
 
 } nmp_transport;
@@ -1695,7 +1686,6 @@ struct nmp_buf_send
 
     union
     {
-        nmp_header packet;
         nmp_request request;
         nmp_response response;
         nmp_transport transport;
@@ -1832,7 +1822,7 @@ static inline u32 nmp_ring_recv_net(struct nmp_data *nmp)
 
     io_uring_prep_recvmsg_multishot(sqe, nmp->net_udp, &nmp->recv_hdr, 0);
     sqe->flags |= IOSQE_BUFFER_SELECT;
-    sqe->user_data = 0;
+    sqe->user_data = RING_CQ_NET;
     sqe->buf_group = RING_NET_GROUP;
 
     return 0;
@@ -1849,7 +1839,7 @@ static inline u32 nmp_ring_recv_local(struct nmp_data *nmp)
 
     io_uring_prep_recv_multishot(sqe, nmp->local_rx, NULL, 0, 0);
     sqe->flags |= IOSQE_BUFFER_SELECT;
-    sqe->user_data = 1;
+    sqe->user_data = RING_CQ_LOCAL;
     sqe->buf_group = RING_LOCAL_GROUP;
 
     return 0;
@@ -2039,15 +2029,17 @@ static u32 session_transport_send(struct nmp_data *nmp, struct session *ctx,
 
     struct nmp_buf_send *buf = nmp_ring_send_buf(nmp, ctx);
     const u32 packet_len = sizeof(nmp_transport) + amt + NOISE_AEAD_MAC;
-    nmp_transport *packet = &buf->transport;
-    u8 *ciphertext = packet->payload;
+
+    u8 *packet = buf->data;
+    nmp_transport *header = (nmp_transport *) packet;
+    u8 *ciphertext = packet + sizeof(nmp_transport);
     u8 *mac = ciphertext + amt;
 
-    packet->header.type_pad_id = header_initialize(type, ctx->session_id);
-    packet->header.counter = ctx->noise_counter_send;
+    header->type_pad_id = header_initialize(type, ctx->session_id);
+    header->counter = ctx->noise_counter_send;
 
     noise_encrypt(ctx->noise_key_send, ctx->noise_counter_send,
-                  &packet->header, sizeof(nmp_transport),
+                  header, sizeof(nmp_transport),
                   payload, amt,
                   ciphertext, mac);
 
@@ -2063,35 +2055,34 @@ static u32 session_transport_send(struct nmp_data *nmp, struct session *ctx,
 
 
 static i32 session_transport_receive(struct session *ctx,
-                                     const nmp_transport *packet, const u32 packet_len)
+                                     const u8 *packet, const u32 packet_len)
 {
-    const u64 counter_remote = packet->header.counter;
     const i32 payload_len = (i32) (packet_len - sizeof(nmp_transport) - NOISE_AEAD_MAC);
     if (payload_len < 0)
     {
-        log("rejecting packet size %xu", packet->header.type_pad_id.session_id);
+        log("rejecting packet size");
         return -1;
     }
 
+    const nmp_transport *header = (const nmp_transport *) packet;
+    const u8 *ciphertext = packet + sizeof(nmp_transport);
+    const u8 *mac = ciphertext + payload_len;
+    const u64 counter_remote = header->counter;
     const i32 block_index = noise_counter_validate(ctx->noise_counter_block,
                                                    ctx->noise_counter_receive,
                                                    counter_remote);
     if (block_index < 0)
     {
-        log("counter rejected %xu", packet->header.type_pad_id.session_id);
+        log("counter rejected %xu", header->type_pad_id.session_id);
         return -1;
     }
-
-    const nmp_transport *header = packet;
-    const u8 *ciphertext = header->payload;
-    const u8 *mac = ciphertext + payload_len;
 
     if (noise_decrypt(ctx->noise_key_receive, counter_remote,
                       header, sizeof(nmp_transport),
                       ciphertext, payload_len,
                       mac, ctx->payload))
     {
-        log("decryption failed %xu", packet->header.type_pad_id.session_id);
+        log("decryption failed %xu", header->type_pad_id.session_id);
         return -1;
     }
 
@@ -2460,8 +2451,8 @@ static i32 event_local(struct nmp_data *nmp,
         }
     }
 
-    const u32 buf_id = cqe->flags >> IORING_CQE_BUFFER_SHIFT;
-    struct nmp_local_request *request = nmp->recv_local.base + buf_id;
+    const u32 bid = cqe->flags >> IORING_CQE_BUFFER_SHIFT;
+    struct nmp_local_request *request = nmp->recv_local.base + bid;
     struct session *ctx = NULL;
 
     // find context for types that need it,
@@ -2510,7 +2501,7 @@ static i32 event_local(struct nmp_data *nmp,
     }
 
     nmp_ring_reuse_buf(nmp->recv_local.ring, request,
-                       sizeof(struct nmp_local_request), buf_id);
+                       sizeof(struct nmp_local_request), bid);
     return result;
 }
 
@@ -3022,8 +3013,7 @@ static struct session *event_net_collect(struct nmp_data *nmp,
         return NULL;
     }
 
-    const i32 payload = session_transport_receive(ctx,
-                                                  (const nmp_transport *) packet, packet_len);
+    const i32 payload = session_transport_receive(ctx, (const u8 *) packet, packet_len);
     if (payload < 0)
     {
         return NULL;
@@ -3185,7 +3175,7 @@ static i32 event_network(struct nmp_data *nmp,
     *ctx_ptr = event_net_collect(nmp, packet, packet_len,
                                  io_uring_recvmsg_name(o));
 
-    nmp_ring_reuse_buf(nmp->recv_net.ring, packet,
+    nmp_ring_reuse_buf(nmp->recv_net.ring, buf,
                        sizeof(struct nmp_recv_buf), bid);
     return 0;
 }
@@ -3615,8 +3605,13 @@ u32 nmp_run(struct nmp_data *nmp, const i32 timeout)
                 continue;
             }
 
-            struct session *ctx = NULL;
             i32 result = 0;
+            struct session *ctx = NULL;
+            if ((cqes[i]->flags & IORING_CQE_F_BUFFER) == 0)
+            {
+                log("unrecognized cqe");
+                return 1;
+            }
 
             switch (io_uring_cqe_get_data64(cqes[i]))
             {
