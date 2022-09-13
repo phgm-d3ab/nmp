@@ -15,7 +15,7 @@ typedef struct nmp_data nmp_t;
 // byte length of keys (both private and public)
 #define NMP_KEYLEN              56
 
-// how many messages can we queue for sending
+// how many messages can we queue for sending (per session)
 #define NMP_QUEUE               256
 
 // how many active sessions can we have simultaneously
@@ -25,7 +25,7 @@ typedef struct nmp_data nmp_t;
 #define NMP_KEEPALIVE_DEFAULT   10
 
 // maximum amount of data sent in a single message
-#define NMP_PAYLOAD_MAX         1452
+#define NMP_PAYLOAD_MAX         1404
 
 // maximum size of application defined payload
 // included with requests and responses
@@ -36,7 +36,7 @@ typedef struct nmp_data nmp_t;
 #define NMP_ADDR_VERIFY         1
 
 
-typedef enum
+enum nmp_status
 {
     // useful when returning empty command
     // from callbacks that discard result
@@ -83,56 +83,51 @@ typedef enum
     // session terminated
     NMP_SESSION_ERR_PROTOCOL,
 
-} nmp_status;
+};
 
 
 // convenience
-typedef union
+union nmp_sa
 {
     struct sockaddr sa;
     struct sockaddr_in ip4;
     struct sockaddr_in6 ip6;
-
-} nmp_sa;
+};
 
 
 // members .addr, .id, .request_payload are
 // set by the library; .context_ptr and
 // .response_payload are set by application
-typedef struct
+struct nmp_request_container
 {
-    nmp_sa addr;
+    union nmp_sa addr;
     uint32_t id;
     uint8_t *request_payload;
 
     void *context_ptr;
     uint8_t response_payload[NMP_INITIATION_PAYLOAD];
+};
 
-} nmp_request_container;
 
-
-typedef union
+union nmp_status_container
 {
     uint8_t payload[NMP_INITIATION_PAYLOAD];
     uint64_t msg_id;
     uint32_t session_id;
-    nmp_sa addr;
+    union nmp_sa addr;
+};
 
-} nmp_status_container;
 
-
-typedef struct
+struct nmp_conf
 {
     // address to bind to
-    nmp_sa addr;
+    union nmp_sa addr;
 
-    // secret (private) key to use
-    // public key is derived using curve25519
-    // and can be retrieved later using nmp_pubkey()
+    // x448 private key to use
     uint8_t key[NMP_KEYLEN];
 
     // set the maximum payload size to be included in a data packet;
-    // values between 524 and NMP_PAYLOAD_MAX (1452) are supported;
+    // values between 492 and NMP_PAYLOAD_MAX (1404) are supported;
     // this can be used to control MTU as typical data packet is made
     // of 16 byte header, payload padded to be multiple of 16 and
     // a poly1305 authentication tag
@@ -153,10 +148,10 @@ typedef struct
 
     // incoming request has arrived: make a decision,
     // optionally populate response_payload member
-    // and return one of NMP_REQUEST_* values
-    nmp_status (*request_cb)(const uint8_t *pubkey,
-                             nmp_request_container *request,
-                             void *request_ctx);
+    // and return one of NMP_CMD_* values
+    enum nmp_status (*request_cb)(const uint8_t *pubkey,
+                                  struct nmp_request_container *,
+                                  void *request_ctx);
 
 
     // new message has arrived
@@ -183,18 +178,17 @@ typedef struct
 
     // deliver various session events:
     // errors, connection status changes
-    nmp_status (*status_cb)(const nmp_status,
-                            const nmp_status_container *,
-                            void *session_ctx);
-
-} nmp_conf_t;
+    enum nmp_status (*status_cb)(const enum nmp_status,
+                                 const union nmp_status_container *,
+                                 void *session_ctx);
+};
 
 
 /*
  *  creates new instance of nmp_t and returns pointer to it
  *  NULL indicates an error
  */
-nmp_t *nmp_new(const nmp_conf_t *);
+nmp_t *nmp_new(const struct nmp_conf *);
 
 
 /*
@@ -219,9 +213,8 @@ uint32_t nmp_run(nmp_t *, int32_t timeout);
  *
  *  returns zero on success
  */
-uint32_t nmp_connect(nmp_t *, const uint8_t *pub, const nmp_sa *addr,
-                     const void *payload, uint32_t payload_len,
-                     void *ctx);
+uint32_t nmp_connect(nmp_t *, const uint8_t *pub, const union nmp_sa *addr,
+                     const void *payload, uint32_t payload_len, void *ctx);
 
 
 /*
