@@ -98,14 +98,6 @@ static const char *nmp_dbg_msg_status[] =
 
 #define UNUSED(arg_)    ((void)(arg_))
 
-// check result against expected fail condition
-// and if it is met, jump to 'fail' label
-#define res_check_int(call_, fail_cond_, ...) ({  \
-            const int result = call_(__VA_ARGS__);\
-            if (result == fail_cond_)             \
-            { log("fail"); goto fail; }           \
-            result;})
-
 
 // cosmetics mainly
 #define mem_alloc(size_)                malloc(size_)
@@ -1100,13 +1092,17 @@ struct noise_responder
 
 struct noise_keypair
 {
-    u8 private[NOISE_DHLEN];
+    EVP_PKEY *evp_priv;
+    EVP_PKEY_CTX *evp_dh;
     u8 public[NOISE_DHLEN];
 };
 
 
 struct noise_handshake
 {
+    EVP_MD_CTX *evp_md;
+    EVP_CIPHER_CTX *evp_cipher;
+
     u8 cipher_k[NOISE_KEYLEN];
     u64 cipher_n;
     u8 symmetric_ck[NOISE_HASHLEN];
@@ -1119,104 +1115,147 @@ struct noise_handshake
 };
 
 
-static inline void noise_hash(const void *data, const u32 data_len,
-                              u8 output[NOISE_HASHLEN])
+static u32 noise_hash(EVP_MD_CTX *md,
+                      const void *data, const u32 data_len,
+                      u8 output[NOISE_HASHLEN])
 {
-    u32 md_len = NOISE_HASHLEN;
-    EVP_MD_CTX *md = EVP_MD_CTX_new();
-    EVP_DigestInit(md, EVP_blake2b512());
-    EVP_DigestUpdate(md, data, data_len);
-    EVP_DigestFinal(md, output, &md_len);
-    EVP_MD_CTX_free(md);
+    if (EVP_MD_CTX_reset(md) != 1)
+        return 1;
+
+    if (EVP_DigestInit_ex(md, EVP_blake2b512(), NULL) != 1)
+        return 1;
+
+    if (EVP_DigestUpdate(md, data, data_len) != 1)
+        return 1;
+
+    if (EVP_DigestFinal_ex(md, output, NULL) != 1)
+        return 1;
+
+    return 0;
 }
 
 
-static inline void noise_hmac_hash(const u8 key[NOISE_KEYLEN],
-                                   const void *data, const u32 data_len,
-                                   u8 output[NOISE_HASHLEN])
+static inline u32 noise_hmac_hash(const u8 key[NOISE_KEYLEN],
+                                  const void *data, const u32 data_len,
+                                  u8 output[NOISE_HASHLEN])
 {
-    u32 md_len = NOISE_HASHLEN;
-    HMAC(EVP_blake2b512(), key, NOISE_KEYLEN,
-         data, data_len,
-         output, &md_len);
+    return (HMAC(EVP_blake2b512(),
+                 key, NOISE_KEYLEN,
+                 data, data_len,
+                 output, NULL) == NULL);
 }
 
 
 // noise spec has third output, but it is not used
 // in this handshake pattern so not included here
-static void noise_hkdf(const u8 *ck, const u8 *ikm,
-                       u8 output1[NOISE_HASHLEN],
-                       u8 output2[NOISE_HASHLEN])
+static u32 noise_hkdf(const u8 *ck, const u8 *ikm, const u32 ikm_len,
+                      u8 output1[NOISE_HASHLEN],
+                      u8 output2[NOISE_HASHLEN])
 {
     const u8 byte_1 = 0x01;
     u8 temp_key[NOISE_HASHLEN] = {0};
-    noise_hmac_hash(ck, ikm,
-                    ikm ? NOISE_KEYLEN : 0, temp_key);
+    if (noise_hmac_hash(ck, ikm, ikm_len, temp_key))
+        return 1;
 
-    noise_hmac_hash(temp_key,
-                    &byte_1, sizeof(u8),
-                    output1);
+    if (noise_hmac_hash(temp_key,
+                        &byte_1, sizeof(u8),
+                        output1))
+        return 1;
 
     u8 buf2[NOISE_HASHLEN + 8] = {0};
     mem_copy(buf2, output1, NOISE_HASHLEN);
     buf2[NOISE_HASHLEN] = 0x02; // h || byte(0x02)
-    noise_hmac_hash(temp_key,
-                    buf2, NOISE_HASHLEN + sizeof(u8),
-                    output2);
+    if (noise_hmac_hash(temp_key, buf2, (NOISE_HASHLEN + sizeof(u8)),
+                        output2))
+        return 1;
+
+    return 0;
 }
 
 
-static inline void noise_dh(const struct noise_keypair *key_pair,
-                            const u8 *public_key,
-                            u8 shared_secret[NOISE_DHLEN])
+static inline u32 noise_dh(EVP_MD_CTX *evp_md,
+                           const struct noise_keypair *key_pair,
+                           const u8 *public_key,
+                           u8 shared_secret[NOISE_DHLEN])
 {
     u64 dhlen = NOISE_DHLEN;
     u8 temp[NOISE_DHLEN] = {0};
-    EVP_PKEY *private = EVP_PKEY_new_raw_private_key(EVP_PKEY_X448, NULL,
-                                                     key_pair->private, NOISE_DHLEN);
     EVP_PKEY *remote_pub = EVP_PKEY_new_raw_public_key(EVP_PKEY_X448, NULL,
                                                        public_key, NOISE_DHLEN);
-    EVP_PKEY_CTX *dh = EVP_PKEY_CTX_new(private, NULL);
-    EVP_PKEY_derive_init(dh);
-    EVP_PKEY_derive_set_peer(dh, remote_pub);
-    EVP_PKEY_derive(dh, temp, &dhlen);
+    if (remote_pub == NULL)
+        return 1;
 
-    EVP_PKEY_CTX_free(dh);
+    if (EVP_PKEY_derive_init(key_pair->evp_dh) != 1)
+        return 1;
+
+    if (EVP_PKEY_derive_set_peer(key_pair->evp_dh, remote_pub) != 1)
+        return 1;
+
+    if (EVP_PKEY_derive(key_pair->evp_dh, temp, &dhlen) != 1)
+        return 1;
+
     EVP_PKEY_free(remote_pub);
-    EVP_PKEY_free(private);
 
     u8 temp_dh[NOISE_HASHLEN] = {0};
-    noise_hash(temp, NOISE_DHLEN, temp_dh);
+    if (noise_hash(evp_md, temp, NOISE_DHLEN, temp_dh))
+        return 1;
 
     // discard some bytes
     mem_copy(shared_secret, temp_dh, NOISE_DHLEN);
+    return 0;
 }
 
 
-static inline void noise_keypair_initialize(struct noise_keypair *pair)
+static inline u32 noise_keypair_initialize(struct noise_keypair *pair,
+                                           const u8 private[NOISE_DHLEN])
 {
+    if (private)
+    {
+        if (pair->evp_priv)
+            return 1;
+
+        pair->evp_priv = EVP_PKEY_new_raw_private_key(EVP_PKEY_X448, NULL,
+                                                      private, NOISE_DHLEN);
+        if (pair->evp_priv == NULL)
+            return 1;
+    }
+
+    pair->evp_dh = EVP_PKEY_CTX_new(pair->evp_priv, NULL);
+    if (pair->evp_dh == NULL)
+        return 1;
+
     u64 keylen = NOISE_DHLEN;
-    EVP_PKEY *key = EVP_PKEY_new_raw_private_key(EVP_PKEY_X448, NULL,
-                                                 pair->private, NOISE_DHLEN);
-    EVP_PKEY_get_raw_public_key(key, pair->public, &keylen);
-    EVP_PKEY_free(key);
+    if (EVP_PKEY_get_raw_public_key(pair->evp_priv, pair->public, &keylen) != 1)
+        return 1;
+
+    return 0;
 }
 
 
-static u32 noise_keypair_generate(struct noise_keypair *pair)
+static u32 noise_keypair_generate(EVP_MD_CTX *evp_md,
+                                  struct noise_keypair *pair)
 {
     u8 buf[NOISE_HASHLEN] = {0};
     if (rnd_get(&buf, sizeof(buf)))
-    {
         return 1;
-    }
 
     u8 hash[NOISE_HASHLEN] = {0};
-    noise_hash(buf, NOISE_HASHLEN, hash);
-    mem_copy(pair->private, hash, NOISE_DHLEN);
+    if (noise_hash(evp_md, buf, NOISE_HASHLEN, hash))
+        return 1;
 
-    noise_keypair_initialize(pair);
-    return 0;
+    pair->evp_priv = EVP_PKEY_new_raw_private_key(EVP_PKEY_X448, NULL,
+                                                  hash, NOISE_DHLEN);
+    if (pair->evp_priv == NULL)
+        return 1;
+
+    return noise_keypair_initialize(pair, NULL);
+}
+
+
+static void noise_keypair_del(struct noise_keypair *pair)
+{
+    EVP_PKEY_CTX_free(pair->evp_dh);
+    EVP_PKEY_free(pair->evp_priv);
 }
 
 
@@ -1237,26 +1276,45 @@ static inline void noise_chacha20_nonce(const u64 counter, u8 output[12])
 }
 
 
-static inline void noise_encrypt(const u8 *k, const u64 n,
-                                 const void *ad, const u32 ad_len,
-                                 const void *plaintext, const u32 plaintext_len,
-                                 u8 *ciphertext, u8 *mac)
+static inline u32 noise_encrypt(EVP_CIPHER_CTX *evp_cipher,
+                                const u8 *k, const u64 n,
+                                const void *ad, const u32 ad_len,
+                                const void *plaintext, const u32 plaintext_len,
+                                u8 *ciphertext, u8 *mac)
 {
     i32 output_len = 0;
     u8 nonce[12];
     noise_chacha20_nonce(n, nonce);
 
-    EVP_CIPHER_CTX *cipher = EVP_CIPHER_CTX_new();
-    EVP_EncryptInit(cipher, EVP_chacha20_poly1305(), k, nonce);
-    EVP_EncryptUpdate(cipher, NULL, &output_len, ad, (int) ad_len);
-    EVP_EncryptUpdate(cipher, ciphertext, &output_len, plaintext, (i32) plaintext_len);
-    EVP_EncryptFinal(cipher, ciphertext + output_len, &output_len);
-    EVP_CIPHER_CTX_ctrl(cipher, EVP_CTRL_AEAD_GET_TAG, NOISE_AEAD_MAC, mac);
-    EVP_CIPHER_CTX_free(cipher);
+    if (EVP_CIPHER_CTX_reset(evp_cipher) != 1)
+        return 1;
+
+    if (EVP_EncryptInit_ex(evp_cipher, EVP_chacha20_poly1305(),
+                           NULL, k, nonce) != 1)
+        return 1;
+
+    if (EVP_EncryptUpdate(evp_cipher, NULL, &output_len,
+                          ad, (int) ad_len) != 1)
+        return 1;
+
+    if (EVP_EncryptUpdate(evp_cipher, ciphertext, &output_len,
+                          plaintext, (i32) plaintext_len) != 1)
+        return 1;
+
+    if (EVP_EncryptFinal(evp_cipher, ciphertext + output_len,
+                         &output_len) != 1)
+        return 1;
+
+    if (EVP_CIPHER_CTX_ctrl(evp_cipher, EVP_CTRL_AEAD_GET_TAG,
+                            NOISE_AEAD_MAC, mac) != 1)
+        return 1;
+
+    return 0;
 }
 
 
-static inline u32 noise_decrypt(const u8 *k, const u64 n,
+static inline u32 noise_decrypt(EVP_CIPHER_CTX *evp_cipher,
+                                const u8 *k, const u64 n,
                                 const void *ad, const u32 ad_len,
                                 const u8 *ciphertext, const u32 ciphertext_len,
                                 const u8 *mac, void *plaintext)
@@ -1265,67 +1323,103 @@ static inline u32 noise_decrypt(const u8 *k, const u64 n,
     u8 nonce[12];
     noise_chacha20_nonce(n, nonce);
 
-    u8 mac_temp[NOISE_AEAD_MAC];
+    u8 mac_temp[NOISE_AEAD_MAC]; // fixme
     mem_copy(mac_temp, mac, NOISE_AEAD_MAC);
 
-    EVP_CIPHER_CTX *cipher = EVP_CIPHER_CTX_new();
-    EVP_DecryptInit(cipher, EVP_chacha20_poly1305(), k, nonce);
-    EVP_DecryptUpdate(cipher, NULL, &output_len, ad, (int) ad_len);
-    EVP_DecryptUpdate(cipher, plaintext, &output_len, ciphertext, (i32) ciphertext_len);
-    EVP_CIPHER_CTX_ctrl(cipher, EVP_CTRL_AEAD_SET_TAG, NOISE_AEAD_MAC, mac_temp);
-    const int result = EVP_DecryptFinal(cipher, plaintext + output_len, &output_len);
-    EVP_CIPHER_CTX_free(cipher);
+    if (EVP_CIPHER_CTX_reset(evp_cipher) != 1)
+        return 1;
 
-    return (result <= 0);
+    if (EVP_DecryptInit(evp_cipher, EVP_chacha20_poly1305(),
+                        k, nonce) != 1)
+        return 1;
+
+    if (EVP_DecryptUpdate(evp_cipher, NULL, &output_len,
+                          ad, (int) ad_len) != 1)
+        return 1;
+
+    if (EVP_DecryptUpdate(evp_cipher, plaintext, &output_len,
+                          ciphertext, (i32) ciphertext_len) != 1)
+        return 1;
+
+    if (EVP_CIPHER_CTX_ctrl(evp_cipher, EVP_CTRL_AEAD_SET_TAG,
+                            NOISE_AEAD_MAC, mac_temp) != 1)
+        return 1;
+
+    return (EVP_DecryptFinal(evp_cipher, plaintext + output_len,
+                             &output_len) != 1);
 }
 
 
-static void noise_mix_key(struct noise_handshake *state,
-                          const u8 *ikm)
+static u32 noise_mix_key(struct noise_handshake *state,
+                         const u8 *ikm, const u32 ikm_len)
 {
     u8 temp_k[NOISE_HASHLEN] = {0};
 
-    noise_hkdf(state->symmetric_ck, ikm,
-               state->symmetric_ck,
-               temp_k);
+    if (noise_hkdf(state->symmetric_ck, ikm, ikm_len,
+                   state->symmetric_ck,
+                   temp_k))
+        return 1;
 
     // initialize_key(temp_k), truncated
     mem_copy(state->cipher_k, temp_k, NOISE_KEYLEN);
+    return 0;
 }
 
 
-static void noise_mix_hash(struct noise_handshake *state,
-                           const void *data, const u32 data_len)
+static u32 noise_mix_hash(struct noise_handshake *state,
+                          const void *data, const u32 data_len)
 {
-    u32 md_len = NOISE_HASHLEN;
-    EVP_MD_CTX *md = EVP_MD_CTX_new();
-    EVP_DigestInit(md, EVP_blake2b512());
-    EVP_DigestUpdate(md, state->symmetric_h, NOISE_HASHLEN);
-    EVP_DigestUpdate(md, data, data_len);
-    EVP_DigestFinal(md, state->symmetric_h, &md_len);
-    EVP_MD_CTX_free(md);
+    if (EVP_MD_CTX_reset(state->evp_md) != 1)
+        return 1;
+
+    if (EVP_DigestInit_ex(state->evp_md, EVP_blake2b512(), NULL) != 1)
+        return 1;
+
+    if (EVP_DigestUpdate(state->evp_md,
+                         state->symmetric_h, NOISE_HASHLEN) != 1)
+        return 1;
+
+    if (EVP_DigestUpdate(state->evp_md,
+                         data, data_len) != 1)
+        return 1;
+
+    if (EVP_DigestFinal_ex(state->evp_md, state->symmetric_h, NULL) != 1)
+        return 1;
+
+    return 0;
 }
 
 
 // serves as a mix_key(dh(..))
-static void noise_mix_key_dh(struct noise_handshake *state,
-                             const struct noise_keypair *pair, const u8 *public_key)
+static u32 noise_mix_key_dh(struct noise_handshake *state,
+                            const struct noise_keypair *pair,
+                            const u8 *public_key)
 {
     u8 temp_dh[NOISE_DHLEN] = {0};
-    noise_dh(pair, public_key, temp_dh);
-    noise_mix_key(state, temp_dh); // fixme
+    if (noise_dh(state->evp_md, pair, public_key, temp_dh))
+        return 1;
+
+    if (noise_mix_key(state, temp_dh, NOISE_DHLEN))
+        return 1;
+
+    return 0;
 }
 
 
-static void noise_encrypt_and_hash(struct noise_handshake *state,
-                                   const void *plaintext, const u32 plaintext_len,
-                                   u8 *ciphertext, u8 *mac)
+static u32 noise_encrypt_and_hash(struct noise_handshake *state,
+                                  const void *plaintext, const u32 plaintext_len,
+                                  u8 *ciphertext, u8 *mac)
 {
-    noise_encrypt(state->cipher_k, state->cipher_n,
-                  state->symmetric_h, NOISE_HASHLEN,
-                  plaintext, plaintext_len,
-                  ciphertext, mac);
-    noise_mix_hash(state, ciphertext, plaintext_len);
+    if (noise_encrypt(state->evp_cipher, state->cipher_k, state->cipher_n,
+                      state->symmetric_h, NOISE_HASHLEN,
+                      plaintext, plaintext_len,
+                      ciphertext, mac))
+        return 1;
+
+    if (noise_mix_hash(state, ciphertext, plaintext_len))
+        return 1;
+
+    return 0;
 }
 
 
@@ -1333,43 +1427,51 @@ static u32 noise_decrypt_and_hash(struct noise_handshake *state,
                                   const u8 *ciphertext, const u32 ciphertext_len,
                                   const u8 *mac, void *plaintext)
 {
-    if (noise_decrypt(state->cipher_k, state->cipher_n,
+    if (noise_decrypt(state->evp_cipher, state->cipher_k, state->cipher_n,
                       state->symmetric_h, NOISE_HASHLEN,
                       ciphertext, ciphertext_len,
                       mac, plaintext))
-    {
         return 1;
-    }
 
-    noise_mix_hash(state, ciphertext, ciphertext_len);
+    if (noise_mix_hash(state, ciphertext, ciphertext_len))
+        return 1;
+
     return 0;
 }
 
 
-static void noise_split(const struct noise_handshake *state,
-                        u8 *c1, u8 *c2)
+static u32 noise_split(const struct noise_handshake *state,
+                       u8 *c1, u8 *c2)
 {
     u8 temp_k1[NOISE_HASHLEN] = {0};
     u8 temp_k2[NOISE_HASHLEN] = {0};
 
-    noise_hkdf(state->symmetric_ck, NULL, // 'zerolen'
-               temp_k1, temp_k2);
+    if (noise_hkdf(state->symmetric_ck, NULL, 0,
+                   temp_k1, temp_k2))
+        return 1;
 
     mem_copy(c1, temp_k1, NOISE_KEYLEN);
     mem_copy(c2, temp_k2, NOISE_KEYLEN);
+
+    return 0;
 }
 
 
-static void noise_initiator_init(struct noise_handshake *state,
-                                 struct noise_keypair *s,
-                                 const u8 *rs)
+static u32 noise_initiator_init(struct noise_handshake *state,
+                                EVP_MD_CTX *evp_md,
+                                EVP_CIPHER_CTX *evp_cipher,
+                                struct noise_keypair *s,
+                                const u8 *rs)
 {
+    state->evp_cipher = evp_cipher;
+    state->evp_md = evp_md;
     mem_copy(state->symmetric_h, noise_protocol_name, NOISE_HASHLEN);
     mem_copy(state->symmetric_ck, noise_protocol_name, NOISE_HASHLEN);
 
     state->s = s;
     mem_copy(state->rs, rs, NOISE_DHLEN);
-    noise_mix_hash(state, rs, NOISE_DHLEN);
+
+    return noise_mix_hash(state, rs, NOISE_DHLEN);
 }
 
 
@@ -1378,34 +1480,36 @@ static u32 noise_initiator_write(struct noise_handshake *state,
                                  const void *ad, const u32 ad_len,
                                  const u8 *payload)
 {
-    noise_mix_hash(state, ad, ad_len);
+    if (noise_mix_hash(state, ad, ad_len))
+        return 1;
 
     // e
-    if (noise_keypair_generate(&state->e))
-    {
+    if (noise_keypair_generate(state->evp_md, &state->e))
         return 1;
-    }
 
-    noise_mix_hash(state, state->e.public, NOISE_DHLEN);
     mem_copy(initiator->ephemeral, state->e.public, NOISE_DHLEN);
+    if (noise_mix_hash(state, state->e.public, NOISE_DHLEN))
+        return 1;
 
     // es
-    noise_mix_key_dh(state, &state->e, state->rs);
+    if (noise_mix_key_dh(state, &state->e, state->rs))
+        return 1;
 
     // s
-    noise_encrypt_and_hash(state,
-                           state->s->public, NOISE_DHLEN,
-                           initiator->encrypted_static,
-                           initiator->mac1);
+    if (noise_encrypt_and_hash(state,
+                               state->s->public, NOISE_DHLEN,
+                               initiator->encrypted_static,
+                               initiator->mac1))
+        return 1;
 
     // ss
-    noise_mix_key_dh(state, state->s, state->rs);
+    if (noise_mix_key_dh(state, state->s, state->rs))
+        return 1;
 
     // payload: encrypt_and_hash(payload)
-    noise_encrypt_and_hash(state,
-                           payload, NOISE_HANDSHAKE_PAYLOAD,
-                           initiator->encrypted_payload, initiator->mac2);
-    return 0;
+    return noise_encrypt_and_hash(state,
+                                  payload, NOISE_HANDSHAKE_PAYLOAD,
+                                  initiator->encrypted_payload, initiator->mac2);
 }
 
 
@@ -1414,16 +1518,20 @@ static u32 noise_responder_read(struct noise_handshake *state,
                                 const void *ad, const u32 ad_len,
                                 u8 *payload)
 {
-    noise_mix_hash(state, ad, ad_len);
+    if (noise_mix_hash(state, ad, ad_len))
+        return 1;
 
     // e
-    noise_mix_hash(state, responder->ephemeral, NOISE_DHLEN);
+    if (noise_mix_hash(state, responder->ephemeral, NOISE_DHLEN))
+        return 1;
 
     // ee
-    noise_mix_key_dh(state, &state->e, responder->ephemeral);
+    if (noise_mix_key_dh(state, &state->e, responder->ephemeral))
+        return 1;
 
     // se
-    noise_mix_key_dh(state, state->s, responder->ephemeral);
+    if (noise_mix_key_dh(state, state->s, responder->ephemeral))
+        return 1;
 
     // payload
     return noise_decrypt_and_hash(state,
@@ -1432,13 +1540,19 @@ static u32 noise_responder_read(struct noise_handshake *state,
 }
 
 
-static void noise_responder_init(struct noise_handshake *state,
-                                 struct noise_keypair *s)
+static u32 noise_responder_init(struct noise_handshake *state,
+                                EVP_MD_CTX *evp_md,
+                                EVP_CIPHER_CTX *evp_cipher,
+                                struct noise_keypair *s)
 {
+    state->evp_cipher = evp_cipher;
+    state->evp_md = evp_md;
     state->s = s;
+
     mem_copy(state->symmetric_h, noise_protocol_name, NOISE_HASHLEN);
     mem_copy(state->symmetric_ck, noise_protocol_name, NOISE_HASHLEN);
-    noise_mix_hash(state, s->public, NOISE_DHLEN);
+
+    return noise_mix_hash(state, s->public, NOISE_DHLEN);
 }
 
 
@@ -1447,24 +1561,29 @@ static u32 noise_initiator_read(struct noise_handshake *state,
                                 const void *ad, const u32 ad_len,
                                 u8 *payload)
 {
-    noise_mix_hash(state, ad, ad_len);
+    if (noise_mix_hash(state, ad, ad_len))
+        return 1;
 
     // e
     mem_copy(state->re, initiator->ephemeral, NOISE_DHLEN);
-    noise_mix_hash(state, state->re, NOISE_DHLEN);
+    if (noise_mix_hash(state, state->re, NOISE_DHLEN))
+        return 1;
 
     // es
-    noise_mix_key_dh(state, state->s, state->re);
+    if (noise_mix_key_dh(state, state->s, state->re))
+        return 1;
 
     // s
     if (noise_decrypt_and_hash(state, initiator->encrypted_static, NOISE_DHLEN,
                                initiator->mac1, state->rs))
     {
+        log("failed to process s");
         return 1;
     }
 
     // ss
-    noise_mix_key_dh(state, state->s, state->rs);
+    if (noise_mix_key_dh(state, state->s, state->rs))
+        return 1;
 
     // payload
     return noise_decrypt_and_hash(state,
@@ -1478,27 +1597,37 @@ static u32 noise_responder_write(struct noise_handshake *state,
                                  const void *ad, const u32 ad_len,
                                  const void *payload)
 {
-    noise_mix_hash(state, ad, ad_len);
+    if (noise_mix_hash(state, ad, ad_len))
+        return 1;
 
     // e
-    if (noise_keypair_generate(&state->e))
-    {
+    if (noise_keypair_generate(state->evp_md, &state->e))
         return 1;
-    }
 
-    noise_mix_hash(state, state->e.public, NOISE_DHLEN);
     mem_copy(responder->ephemeral, state->e.public, NOISE_DHLEN);
+    if (noise_mix_hash(state, state->e.public, NOISE_DHLEN))
+        return 1;
 
     // ee
-    noise_mix_key_dh(state, &state->e, state->re);
+    if (noise_mix_key_dh(state, &state->e, state->re))
+        return 1;
 
     // se
-    noise_mix_key_dh(state, &state->e, state->rs);
+    if (noise_mix_key_dh(state, &state->e, state->rs))
+        return 1;
 
     // payload
-    noise_encrypt_and_hash(state,
-                           payload, NOISE_HANDSHAKE_PAYLOAD,
-                           responder->encrypted_payload, responder->mac);
+    return noise_encrypt_and_hash(state,
+                                  payload, NOISE_HANDSHAKE_PAYLOAD,
+                                  responder->encrypted_payload, responder->mac);
+}
+
+
+static u32 noise_state_del(struct noise_handshake *state)
+{
+    log("cleaning up state %p", state->e.evp_priv);
+
+    noise_keypair_del(&state->e);
     return 0;
 }
 
@@ -1507,14 +1636,15 @@ static i32 noise_counter_validate(const u32 block[8],
                                   const u64 local,
                                   const u64 remote)
 {
-    // if too old
     if (remote + NOISE_COUNTER_WINDOW < local)
     {
+        log("rejecting counter: too old");
         return -1;
     }
 
     if (remote > (local + NOISE_COUNTER_WINDOW) || remote == NOISE_NONCE_MAX)
     {
+        log("rejecting counter: outside of window / max");
         return -1;
     }
 
@@ -1690,7 +1820,7 @@ struct nmp_buf_send
         struct nmp_request request;
         struct nmp_response response;
         struct nmp_transport transport;
-        u8 data[1500];
+        u8 data[NET_PACKET_MAX];
     };
 };
 
@@ -1758,6 +1888,9 @@ struct nmp_data
     u32 options;
     sa_family_t sa_family;
     u8 retries[6];
+
+    EVP_MD_CTX *evp_md_ctx;
+    EVP_CIPHER_CTX *evp_cipher;
 
     void *request_context;
     enum nmp_status (*request_cb)(const u8 *,
@@ -2077,7 +2210,7 @@ static u32 session_transport_send(struct nmp_data *nmp, struct session *ctx,
     header->type_pad_id = header_initialize(type, ctx->session_id);
     header->counter = ctx->noise_counter_send;
 
-    noise_encrypt(ctx->noise_key_send, ctx->noise_counter_send,
+    noise_encrypt(nmp->evp_cipher, ctx->noise_key_send, ctx->noise_counter_send,
                   header, sizeof(struct nmp_transport),
                   payload, amt,
                   ciphertext, mac);
@@ -2093,7 +2226,7 @@ static u32 session_transport_send(struct nmp_data *nmp, struct session *ctx,
 }
 
 
-static i32 session_transport_receive(struct session *ctx,
+static i32 session_transport_receive(struct nmp_data *nmp, struct session *ctx,
                                      const u8 *packet, const u32 packet_len)
 {
     const i32 payload_len = (i32) (packet_len
@@ -2117,7 +2250,7 @@ static i32 session_transport_receive(struct session *ctx,
         return -1;
     }
 
-    if (noise_decrypt(ctx->noise_key_receive, counter_remote,
+    if (noise_decrypt(nmp->evp_cipher, ctx->noise_key_receive, counter_remote,
                       header, sizeof(struct nmp_transport),
                       ciphertext, payload_len,
                       mac, ctx->payload))
@@ -2653,6 +2786,9 @@ static i32 event_net_data(struct nmp_data *nmp, struct session *ctx,
     {
         ctx->state = SESSION_STATUS_ESTAB;
         ctx->response_retries = 0;
+        if (noise_state_del(&ctx->initiation.handshake))
+            return 1; // fixme
+
         mem_zero(ctx->payload, sizeof(struct session_initiation));
 
         if (nmp->status_cb)
@@ -2865,6 +3001,7 @@ static i32 event_net_request(struct nmp_data *nmp,
 
     if (session_response(nmp, ctx))
     {
+        log("failed to generate response");
         return -1;
     }
 
@@ -2947,6 +3084,8 @@ static u32 event_net_response(struct nmp_data *nmp, const u32 session_id,
 
     // checks completed
     ctx->state = SESSION_STATUS_ESTAB;
+    if (noise_state_del(&ctx->initiation.handshake))
+        return 1;
 
     // try to send early data
     switch (session_data(nmp, ctx))
@@ -3040,7 +3179,8 @@ static struct session *event_net_collect(struct nmp_data *nmp,
         return NULL;
     }
 
-    const i32 payload = session_transport_receive(ctx, (const u8 *) packet, packet_len);
+    const i32 payload = session_transport_receive(nmp, ctx,
+                                                  (const u8 *) packet, packet_len);
     if (payload < 0)
     {
         return NULL;
@@ -3228,9 +3368,17 @@ static u32 nmp_destroy(struct nmp_data *nmp)
     if (hash_table_wipe(&nmp->sessions, (void *) session_destroy))
         return 1;
 
-    munmap(nmp->recv_net.ring, nmp->recv_net.size);
-    munmap(nmp->recv_local.ring, nmp->recv_local.size);
-    io_uring_queue_exit(&nmp->ring);
+    if (nmp->recv_net.ring)
+        munmap(nmp->recv_net.ring, nmp->recv_net.size);
+
+    if (nmp->recv_local.ring)
+        munmap(nmp->recv_local.ring, nmp->recv_local.size);
+
+    if (nmp->ring.enter_ring_fd != -1)
+        io_uring_queue_exit(&nmp->ring);
+
+    if (nmp->evp_md_ctx)
+        EVP_MD_CTX_free(nmp->evp_md_ctx);
 
     const i32 descriptors[] =
             {
@@ -3289,7 +3437,7 @@ struct nmp_data *nmp_new(const struct nmp_conf *conf)
     }
 
     if (conf->payload &&
-        (conf->payload < 524 || conf->payload > NMP_PAYLOAD_MAX))
+        (conf->payload < 492 || conf->payload > NMP_PAYLOAD_MAX))
     {
         goto fail;
     }
@@ -3326,9 +3474,19 @@ struct nmp_data *nmp_new(const struct nmp_conf *conf)
     tmp->transport_callbacks.data = conf->data_noack_cb;
     tmp->transport_callbacks.ack = conf->ack_cb;
 
-    mem_copy(tmp->static_keys.private, conf->key, NMP_KEYLEN);
-    noise_keypair_initialize(&tmp->static_keys);
-    noise_responder_init(&tmp->responder_precomp, &tmp->static_keys);
+    tmp->evp_md_ctx = EVP_MD_CTX_new();
+    if (tmp->evp_md_ctx == NULL)
+        goto fail;
+
+    tmp->evp_cipher = EVP_CIPHER_CTX_new();
+    if (tmp->evp_cipher == NULL)
+        goto fail;
+
+    noise_keypair_initialize(&tmp->static_keys, conf->key);
+    noise_responder_init(&tmp->responder_precomp,
+                         tmp->evp_md_ctx,
+                         tmp->evp_cipher,
+                         &tmp->static_keys);
 
 
     struct io_uring_params params = {0};
@@ -3415,6 +3573,8 @@ u32 nmp_connect(struct nmp_data *nmp, const u8 *pub, const union nmp_sa *addr,
     ctx_new->session_id = id;
     ctx_new->addr = *addr;
     noise_initiator_init(&ctx_new->initiation.handshake,
+                         nmp->evp_md_ctx,
+                         nmp->evp_cipher,
                          &nmp->static_keys, pub);
 
     if (payload)
@@ -3613,7 +3773,7 @@ u32 nmp_run(struct nmp_data *nmp, const i32 timeout)
         struct session *events_queue[RING_BATCH] = {0};
         u32 queued = 0;
 
-        // process current batch
+
         for (u32 i = 0; i < batch; i++)
         {
             if (cqes[i]->res < 0)
@@ -3694,7 +3854,6 @@ u32 nmp_run(struct nmp_data *nmp, const i32 timeout)
 
         io_uring_cq_advance(&nmp->ring, batch);
 
-        // deliver queued events
         for (u32 i = 0; i < queued; i++)
         {
             if (event_net_deliver(nmp, events_queue[i]))
