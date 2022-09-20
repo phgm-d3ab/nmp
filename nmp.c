@@ -138,14 +138,10 @@ static u32 rnd_get(void *output, const u32 amt)
         switch (errno)
         {
             case EINTR:
-            {
                 continue;
-            }
 
             default:
-            {
                 return 1;
-            }
         }
     }
 
@@ -190,6 +186,7 @@ static u32 rnd_get32()
     ((u64) (x)[7] << 56) )    \
 )
 
+
 static inline void sip_round(u64 v[4])
 {
     v[0] += v[1];
@@ -209,6 +206,7 @@ static inline void sip_round(u64 v[4])
     v[1] ^= v[2];
     v[2] = rotl64(v[2], 32);
 }
+
 
 static u64 siphash(const u8 *key, const u8 *data, const u32 len)
 {
@@ -271,6 +269,7 @@ static u64 siphash(const u8 *key, const u8 *data, const u32 len)
     return (v[0] ^ v[1] ^ v[2] ^ v[3]);
 }
 
+
 /*
  *  https://en.wikipedia.org/wiki/Open_addressing
  *  https://en.wikipedia.org/wiki/Lazy_deletion
@@ -317,9 +316,7 @@ static u64 hash_table_hash(struct hash_table *ht, const u32 key)
 {
     const u32 index = key & (HASH_TABLE_CACHE - 1);
     if (ht->cache[index].id == key)
-    {
         return ht->cache[index].hash;
-    }
 
     const u64 hash = siphash(ht->key, (const u8 *) &key, sizeof(u32));
     ht->cache[index].id = key;
@@ -340,24 +337,18 @@ static u32 hash_table_slot(struct hash_table *ht, const u64 hash, const u32 item
     {
         index = (natural_slot + i) & (HASH_TABLE_RS - 1);
         if (ht->entry[index].id == item)
-        {
             break;
-        }
 
         if (ht->entry[index].status == entry_deleted)
         {
             if (index_swap == HASH_TABLE_NF)
-            {
                 index_swap = index;
-            }
 
             continue;
         }
 
         if (ht->entry[index].status == entry_empty)
-        {
             break;
-        }
     }
 
     if (index_swap != HASH_TABLE_NF)
@@ -381,9 +372,7 @@ static void *hash_table_lookup(struct hash_table *ht, const u32 id)
     const u32 slot = hash_table_slot(ht, hash, id);
 
     if (slot == HASH_TABLE_NF || ht->entry[slot].id != id)
-    {
         return NULL;
-    }
 
     return ht->entry[slot].ptr;
 }
@@ -392,9 +381,7 @@ static void *hash_table_lookup(struct hash_table *ht, const u32 id)
 static u32 hash_table_insert(struct hash_table *ht, const u32 id, void *ptr)
 {
     if (ht->items >= HASH_TABLE_SIZE)
-    {
         return 1;
-    }
 
     const u64 hash = hash_table_hash(ht, id);
     const u32 natural_slot = (u32) hash & (HASH_TABLE_RS - 1);
@@ -620,14 +607,10 @@ static void msg_context_wipe(struct msg_state *ctx)
     {
         struct msg_tx *entry = tx_get(ctx, i);
         if (entry->status != MSG_TX_EMPTY)
-        {
             mem_free(entry->msg);
-        }
 
         if (i == ctx->tx_seq)
-        {
             break;
-        }
     }
 }
 
@@ -667,7 +650,7 @@ static u32 msg_queue(struct msg_state *ctx, const u8 *msg, const u16 len)
  *  returns number of bytes in payload
  */
 static i32 msg_assemble(struct msg_state *ctx,
-                        u8 *output, const u32 payload_limit)
+                        u8 output[MSG_MAX_PAYLOAD], const u32 payload_limit)
 {
     struct msg_tx *resend_queue[MSG_WINDOW] = {0};
     u32 resend_amt = 0;
@@ -749,18 +732,14 @@ static u32 msg_assemble_retry(struct msg_state *ctx,
         {
             const u16 offset = msg->len + sizeof(struct msg_header);
             if (bytes + offset > payload_limit)
-            {
                 break;
-            }
 
             msg_tx_include(msg, (struct msg_header *) (output + bytes));
             bytes += offset;
         }
 
         if (i == ctx->tx_sent)
-        {
             break;
-        }
     }
 
     return (u32) msg_payload_zeropad(output, (i32) bytes);
@@ -798,14 +777,10 @@ static i32 msg_read(const struct msg_routines *cb, struct msg_state *ctx,
     {
         const struct msg_header *msg = (const struct msg_header *) (payload + iterator);
         if ((len - iterator) <= sizeof(struct msg_header))
-        {
             break;
-        }
 
         if (msg->len == 0)
-        {
             break;
-        }
 
         const u16 msg_len = msg->len & ~(MSG_NOACK | MSG_RESERVED);
         // example: msg->len == 1000 but there are 100 bytes left
@@ -827,9 +802,7 @@ static i32 msg_read(const struct msg_routines *cb, struct msg_state *ctx,
             }
 
             if (cb->data_noack)
-            {
                 cb->data_noack(msg->data, msg->len, ctx->context_ptr);
-            }
 
             return (MSG_WINDOW + 1);
         }
@@ -851,11 +824,8 @@ static i32 msg_read(const struct msg_routines *cb, struct msg_state *ctx,
                 return -1;
             }
 
-            // update rx_seq?
             if (msg_sequence_cmp(msg->sequence, ctx->rx_seq))
-            {
                 ctx->rx_seq = msg->sequence;
-            }
 
             struct msg_rx *entry = rx_get(ctx, msg->sequence);
             if (entry->status == MSG_RX_EMPTY)
@@ -881,22 +851,16 @@ static void msg_deliver_data(const struct msg_routines *cb,
     {
         struct msg_rx *entry = rx_get(ctx, n);
         if (entry->status == MSG_RX_EMPTY)
-        {
             break;
-        }
 
         if (cb->data)
-        {
             cb->data(entry->data, entry->len, ctx->context_ptr);
-        }
 
         ctx->rx_delivered = n;
         entry->status = MSG_RX_EMPTY;
 
         if (n == ctx->rx_seq)
-        {
             break;
-        }
     }
 }
 
@@ -1009,14 +973,10 @@ static i32 msg_deliver_ack(const struct msg_routines *cb,
     {
         struct msg_tx *msg = tx_get(ctx, i);
         if (msg->status != MSG_TX_ACKED)
-        {
             break;
-        }
 
         if (cb->ack)
-        {
             cb->ack(msg->id, ctx->context_ptr);
-        }
 
         mem_free(msg->msg);
         msg->status = MSG_TX_EMPTY;
@@ -1025,15 +985,11 @@ static i32 msg_deliver_ack(const struct msg_routines *cb,
         counter += 1;
 
         if (msg->seq == ctx->tx_sent)
-        {
             break;
-        }
     }
 
     if (ctx->tx_ack == ctx->tx_seq)
-    {
         return -1;
-    }
 
     return counter;
 }
@@ -1100,6 +1056,7 @@ struct noise_keypair
 
 struct noise_handshake
 {
+    HMAC_CTX *evp_hmac;
     EVP_MD_CTX *evp_md;
     EVP_CIPHER_CTX *evp_cipher;
 
@@ -1135,29 +1092,39 @@ static u32 noise_hash(EVP_MD_CTX *md,
 }
 
 
-static inline u32 noise_hmac_hash(const u8 key[NOISE_KEYLEN],
+static inline u32 noise_hmac_hash(HMAC_CTX *hmac,
+                                  const u8 key[NOISE_HASHLEN],
                                   const void *data, const u32 data_len,
                                   u8 output[NOISE_HASHLEN])
 {
-    return (HMAC(EVP_blake2b512(),
-                 key, NOISE_KEYLEN,
-                 data, data_len,
-                 output, NULL) == NULL);
+    if (HMAC_Init_ex(hmac, key, NOISE_HASHLEN, EVP_blake2b512(), NULL) != 1)
+        return 1;
+
+    if (HMAC_Update(hmac, data, data_len) != 1)
+        return 1;
+
+    if (HMAC_Final(hmac, output, NULL) != 1)
+        return 1;
+
+    return 0;
 }
 
 
 // noise spec has third output, but it is not used
 // in this handshake pattern so not included here
-static u32 noise_hkdf(const u8 *ck, const u8 *ikm, const u32 ikm_len,
+static u32 noise_hkdf(HMAC_CTX *hmac, const u8 *ck,
+                      const u8 *ikm, const u32 ikm_len,
                       u8 output1[NOISE_HASHLEN],
                       u8 output2[NOISE_HASHLEN])
 {
     const u8 byte_1 = 0x01;
     u8 temp_key[NOISE_HASHLEN] = {0};
-    if (noise_hmac_hash(ck, ikm, ikm_len, temp_key))
+    if (noise_hmac_hash(hmac, ck,
+                        ikm, ikm_len,
+                        temp_key))
         return 1;
 
-    if (noise_hmac_hash(temp_key,
+    if (noise_hmac_hash(hmac, temp_key,
                         &byte_1, sizeof(u8),
                         output1))
         return 1;
@@ -1165,7 +1132,8 @@ static u32 noise_hkdf(const u8 *ck, const u8 *ikm, const u32 ikm_len,
     u8 buf2[NOISE_HASHLEN + 8] = {0};
     mem_copy(buf2, output1, NOISE_HASHLEN);
     buf2[NOISE_HASHLEN] = 0x02; // h || byte(0x02)
-    if (noise_hmac_hash(temp_key, buf2, (NOISE_HASHLEN + sizeof(u8)),
+    if (noise_hmac_hash(hmac, temp_key,
+                        buf2, (NOISE_HASHLEN + sizeof(u8)),
                         output2))
         return 1;
 
@@ -1276,8 +1244,7 @@ static inline void noise_chacha20_nonce(const u64 counter, u8 output[12])
 }
 
 
-static inline u32 noise_encrypt(EVP_CIPHER_CTX *evp_cipher,
-                                const u8 *k, const u64 n,
+static inline u32 noise_encrypt(EVP_CIPHER_CTX *evp_cipher, const u64 n,
                                 const void *ad, const u32 ad_len,
                                 const void *plaintext, const u32 plaintext_len,
                                 u8 *ciphertext, u8 *mac)
@@ -1286,11 +1253,7 @@ static inline u32 noise_encrypt(EVP_CIPHER_CTX *evp_cipher,
     u8 nonce[12];
     noise_chacha20_nonce(n, nonce);
 
-    if (EVP_CIPHER_CTX_reset(evp_cipher) != 1)
-        return 1;
-
-    if (EVP_EncryptInit_ex(evp_cipher, EVP_chacha20_poly1305(),
-                           NULL, k, nonce) != 1)
+    if (EVP_EncryptInit_ex(evp_cipher, NULL, NULL, NULL, nonce) != 1)
         return 1;
 
     if (EVP_EncryptUpdate(evp_cipher, NULL, &output_len,
@@ -1313,24 +1276,16 @@ static inline u32 noise_encrypt(EVP_CIPHER_CTX *evp_cipher,
 }
 
 
-static inline u32 noise_decrypt(EVP_CIPHER_CTX *evp_cipher,
-                                const u8 *k, const u64 n,
+static inline u32 noise_decrypt(EVP_CIPHER_CTX *evp_cipher, const u64 n,
                                 const void *ad, const u32 ad_len,
                                 const u8 *ciphertext, const u32 ciphertext_len,
-                                const u8 *mac, void *plaintext)
+                                u8 *mac, void *plaintext)
 {
     i32 output_len = 0;
     u8 nonce[12];
     noise_chacha20_nonce(n, nonce);
 
-    u8 mac_temp[NOISE_AEAD_MAC]; // fixme
-    mem_copy(mac_temp, mac, NOISE_AEAD_MAC);
-
-    if (EVP_CIPHER_CTX_reset(evp_cipher) != 1)
-        return 1;
-
-    if (EVP_DecryptInit(evp_cipher, EVP_chacha20_poly1305(),
-                        k, nonce) != 1)
+    if (EVP_DecryptInit_ex(evp_cipher, NULL, NULL, NULL, nonce) != 1)
         return 1;
 
     if (EVP_DecryptUpdate(evp_cipher, NULL, &output_len,
@@ -1342,7 +1297,7 @@ static inline u32 noise_decrypt(EVP_CIPHER_CTX *evp_cipher,
         return 1;
 
     if (EVP_CIPHER_CTX_ctrl(evp_cipher, EVP_CTRL_AEAD_SET_TAG,
-                            NOISE_AEAD_MAC, mac_temp) != 1)
+                            NOISE_AEAD_MAC, mac) != 1)
         return 1;
 
     return (EVP_DecryptFinal(evp_cipher, plaintext + output_len,
@@ -1355,7 +1310,8 @@ static u32 noise_mix_key(struct noise_handshake *state,
 {
     u8 temp_k[NOISE_HASHLEN] = {0};
 
-    if (noise_hkdf(state->symmetric_ck, ikm, ikm_len,
+    if (noise_hkdf(state->evp_hmac, state->symmetric_ck,
+                   ikm, ikm_len,
                    state->symmetric_ck,
                    temp_k))
         return 1;
@@ -1410,7 +1366,11 @@ static u32 noise_encrypt_and_hash(struct noise_handshake *state,
                                   const void *plaintext, const u32 plaintext_len,
                                   u8 *ciphertext, u8 *mac)
 {
-    if (noise_encrypt(state->evp_cipher, state->cipher_k, state->cipher_n,
+    if (EVP_EncryptInit_ex(state->evp_cipher, EVP_chacha20_poly1305(), NULL,
+                           state->cipher_k, NULL) != 1)
+        return 1;
+
+    if (noise_encrypt(state->evp_cipher, state->cipher_n,
                       state->symmetric_h, NOISE_HASHLEN,
                       plaintext, plaintext_len,
                       ciphertext, mac))
@@ -1425,9 +1385,13 @@ static u32 noise_encrypt_and_hash(struct noise_handshake *state,
 
 static u32 noise_decrypt_and_hash(struct noise_handshake *state,
                                   const u8 *ciphertext, const u32 ciphertext_len,
-                                  const u8 *mac, void *plaintext)
+                                  u8 *mac, void *plaintext)
 {
-    if (noise_decrypt(state->evp_cipher, state->cipher_k, state->cipher_n,
+    if (EVP_DecryptInit_ex(state->evp_cipher, EVP_chacha20_poly1305(), NULL,
+                           state->cipher_k, NULL) != 1)
+        return 1;
+
+    if (noise_decrypt(state->evp_cipher, state->cipher_n,
                       state->symmetric_h, NOISE_HASHLEN,
                       ciphertext, ciphertext_len,
                       mac, plaintext))
@@ -1446,7 +1410,8 @@ static u32 noise_split(const struct noise_handshake *state,
     u8 temp_k1[NOISE_HASHLEN] = {0};
     u8 temp_k2[NOISE_HASHLEN] = {0};
 
-    if (noise_hkdf(state->symmetric_ck, NULL, 0,
+    if (noise_hkdf(state->evp_hmac, state->symmetric_ck,
+                   NULL, 0,
                    temp_k1, temp_k2))
         return 1;
 
@@ -1458,11 +1423,13 @@ static u32 noise_split(const struct noise_handshake *state,
 
 
 static u32 noise_initiator_init(struct noise_handshake *state,
+                                HMAC_CTX *evp_hmac,
                                 EVP_MD_CTX *evp_md,
                                 EVP_CIPHER_CTX *evp_cipher,
                                 struct noise_keypair *s,
                                 const u8 *rs)
 {
+    state->evp_hmac = evp_hmac;
     state->evp_cipher = evp_cipher;
     state->evp_md = evp_md;
     mem_copy(state->symmetric_h, noise_protocol_name, NOISE_HASHLEN);
@@ -1514,7 +1481,7 @@ static u32 noise_initiator_write(struct noise_handshake *state,
 
 
 static u32 noise_responder_read(struct noise_handshake *state,
-                                const struct noise_responder *responder,
+                                struct noise_responder *responder,
                                 const void *ad, const u32 ad_len,
                                 u8 *payload)
 {
@@ -1541,10 +1508,12 @@ static u32 noise_responder_read(struct noise_handshake *state,
 
 
 static u32 noise_responder_init(struct noise_handshake *state,
+                                HMAC_CTX *evp_hmac,
                                 EVP_MD_CTX *evp_md,
                                 EVP_CIPHER_CTX *evp_cipher,
                                 struct noise_keypair *s)
 {
+    state->evp_hmac = evp_hmac;
     state->evp_cipher = evp_cipher;
     state->evp_md = evp_md;
     state->s = s;
@@ -1557,7 +1526,7 @@ static u32 noise_responder_init(struct noise_handshake *state,
 
 
 static u32 noise_initiator_read(struct noise_handshake *state,
-                                const struct noise_initiator *initiator,
+                                struct noise_initiator *initiator,
                                 const void *ad, const u32 ad_len,
                                 u8 *payload)
 {
@@ -1759,59 +1728,9 @@ enum session_status
     SESSION_STATUS_ACKWAIT = 5   // some data is in transit
 };
 
-
-struct session_initiation
-{
-    struct noise_handshake handshake;
-    struct
-    {
-        u64 timestamp;
-        u8 data[NMP_INITIATION_PAYLOAD];
-
-    } payload[2];
-
-    struct nmp_request buf_request;
-    struct nmp_response buf_response;
-};
-
-
-struct session
-{
-    u8 state;
-    u8 events;
-    u8 timer_retries;
-    u8 response_retries;
-    u32 session_id;
-
-    u64 noise_counter_send;
-    u64 noise_counter_receive;
-    u32 noise_counter_block[8];
-    u8 noise_key_receive[NOISE_KEYLEN];
-    u8 noise_key_send[NOISE_KEYLEN];
-
-    union nmp_sa addr;
-    u64 stat_tx;
-    u64 stat_rx;
-    struct __kernel_timespec kts;
-
-    union
-    {
-        void *context_ptr;
-        struct msg_state transport;
-    };
-
-    union
-    {
-        u8 payload[MSG_MAX_PAYLOAD];
-        struct session_initiation initiation;
-    };
-};
-
-
 struct nmp_buf_send
 {
     union nmp_sa addr;
-    struct session *owner;
     struct msghdr send_hdr;
     struct iovec iov;
 
@@ -1873,6 +1792,55 @@ struct nmp_recv_local
 };
 
 
+struct session_initiation
+{
+    struct noise_handshake handshake;
+    struct
+    {
+        u64 timestamp;
+        u8 data[NMP_INITIATION_PAYLOAD];
+
+    } payload[2];
+
+    union
+    {
+        struct nmp_request request;
+        struct nmp_response response;
+
+    } recv_buf;
+
+    struct nmp_buf_send send_buf;
+};
+
+
+struct session
+{
+    u8 state;
+    u8 events;
+    u8 timer_retries;
+    u8 response_retries;
+    u32 session_id;
+
+    u64 noise_counter_send;
+    u64 noise_counter_receive;
+    u32 noise_counter_block[8];
+    EVP_CIPHER_CTX *noise_key_receive;
+    EVP_CIPHER_CTX *noise_key_send;
+
+    union nmp_sa addr;
+    u64 stat_tx;
+    u64 stat_rx;
+    struct __kernel_timespec kts;
+    struct session_initiation *initiation;
+
+    union /* just share first member */
+    {
+        void *context_ptr;
+        struct msg_state transport;
+    };
+};
+
+
 struct nmp_data
 {
     struct io_uring ring;
@@ -1889,6 +1857,7 @@ struct nmp_data
     sa_family_t sa_family;
     u8 retries[6];
 
+    HMAC_CTX *evp_hmac;
     EVP_MD_CTX *evp_md_ctx;
     EVP_CIPHER_CTX *evp_cipher;
 
@@ -1931,13 +1900,11 @@ static inline struct io_uring_sqe *nmp_ring_sqe(struct nmp_data *nmp)
 }
 
 
-static inline struct nmp_buf_send *nmp_ring_send_buf(struct nmp_data *nmp,
-                                                     struct session *owner)
+static inline struct nmp_buf_send *nmp_ring_send_buf(struct nmp_data *nmp)
 {
     nmp->send_iterator += 1;
     nmp->send_iterator &= (RING_SEND_BUFFERS - 1);
 
-    nmp->send_buffers[nmp->send_iterator].owner = owner;
     return &nmp->send_buffers[nmp->send_iterator];
 }
 
@@ -2127,17 +2094,28 @@ static u32 nmp_ring_timer_set(struct nmp_data *nmp,
 }
 
 
-static struct session *session_new(struct nmp_data *nmp)
+static struct session *session_new()
 {
+    EVP_CIPHER_CTX *c1 = EVP_CIPHER_CTX_new();
+    EVP_CIPHER_CTX *c2 = EVP_CIPHER_CTX_new();
+    if (!c1 || !c2)
+        goto out_fail;
+
+    struct session_initiation *initiation = mem_alloc(sizeof(struct session_initiation));
+    if (initiation == NULL)
+        goto out_fail;
+
     struct session *ctx = mem_alloc(sizeof(struct session));
     if (ctx == NULL)
-    {
-        log_errno();
-        return NULL;
-    }
+        goto out_fail;
 
 
     mem_zero(ctx, sizeof(struct session));
+    mem_zero(initiation, sizeof(struct session_initiation));
+
+    ctx->initiation = initiation;
+    ctx->noise_key_send = c1;
+    ctx->noise_key_receive = c2;
 
     // sequence numbers start at zero but msg_sequence_cmp()
     // is a strict '>' so set state counters to 0xffff,
@@ -2148,12 +2126,31 @@ static struct session *session_new(struct nmp_data *nmp)
     ctx->transport.rx_delivered = 0xffff;
 
     return ctx;
+    out_fail:
+    {
+        if (c1)
+            mem_free(c1);
+
+        if (c2)
+            mem_free(c2);
+
+        if (initiation)
+            mem_free(initiation);
+
+        if (ctx)
+            mem_free(ctx);
+
+        log_errno();
+        return NULL;
+    };
 }
 
 
 static void session_destroy(struct session *ctx)
 {
     msg_context_wipe(&ctx->transport);
+    EVP_CIPHER_CTX_free(ctx->noise_key_receive);
+    EVP_CIPHER_CTX_free(ctx->noise_key_send);
 
     log("%xu", ctx->session_id);
     mem_zero(ctx, sizeof(struct session));
@@ -2173,9 +2170,7 @@ static void session_drop(struct nmp_data *nmp,
 {
     log("%xu", ctx->session_id);
     if (nmp->status_cb)
-    {
         nmp->status_cb(status, container, ctx->context_ptr);
-    }
 
     // any new network message or local requests related to this
     // context will be simply discarded as there is no hash table
@@ -2199,26 +2194,22 @@ static u32 session_transport_send(struct nmp_data *nmp, struct session *ctx,
         return 0;
     }
 
-    struct nmp_buf_send *buf = nmp_ring_send_buf(nmp, ctx);
-    const u32 packet_len = sizeof(struct nmp_transport) + amt + NOISE_AEAD_MAC;
+    struct nmp_buf_send *buf = nmp_ring_send_buf(nmp);
+    buf->transport.type_pad_id = header_initialize(type, ctx->session_id);
+    buf->transport.counter = ctx->noise_counter_send;
 
+    const u32 packet_len = sizeof(struct nmp_transport) + amt + NOISE_AEAD_MAC;
     u8 *packet = buf->data;
-    struct nmp_transport *header = (struct nmp_transport *) packet;
     u8 *ciphertext = packet + sizeof(struct nmp_transport);
     u8 *mac = ciphertext + amt;
 
-    header->type_pad_id = header_initialize(type, ctx->session_id);
-    header->counter = ctx->noise_counter_send;
-
-    noise_encrypt(nmp->evp_cipher, ctx->noise_key_send, ctx->noise_counter_send,
-                  header, sizeof(struct nmp_transport),
+    noise_encrypt(nmp->evp_cipher, ctx->noise_counter_send,
+                  &buf->transport, sizeof(struct nmp_transport),
                   payload, amt,
                   ciphertext, mac);
 
     if (nmp_ring_send(nmp, buf, packet_len, &ctx->addr))
-    {
         return 1;
-    }
 
     ctx->noise_counter_send += 1;
     ctx->stat_tx += packet_len;
@@ -2227,19 +2218,20 @@ static u32 session_transport_send(struct nmp_data *nmp, struct session *ctx,
 
 
 static i32 session_transport_receive(struct nmp_data *nmp, struct session *ctx,
-                                     const u8 *packet, const u32 packet_len)
+                                     u8 *packet, const u32 packet_len,
+                                     u8 plaintext[MSG_MAX_PAYLOAD])
 {
     const i32 payload_len = (i32) (packet_len
                                    - sizeof(struct nmp_transport) - NOISE_AEAD_MAC);
-    if (payload_len < 0)
+    if (payload_len < 0 || payload_len > MSG_MAX_PAYLOAD)
     {
         log("rejecting packet size");
         return -1;
     }
 
     const struct nmp_transport *header = (const struct nmp_transport *) packet;
-    const u8 *ciphertext = packet + sizeof(struct nmp_transport);
-    const u8 *mac = ciphertext + payload_len;
+    u8 *ciphertext = packet + sizeof(struct nmp_transport);
+    u8 *mac = ciphertext + payload_len;
     const u64 counter_remote = header->counter;
     const i32 block_index = noise_counter_validate(ctx->noise_counter_block,
                                                    ctx->noise_counter_receive,
@@ -2250,10 +2242,11 @@ static i32 session_transport_receive(struct nmp_data *nmp, struct session *ctx,
         return -1;
     }
 
-    if (noise_decrypt(nmp->evp_cipher, ctx->noise_key_receive, counter_remote,
+
+    if (noise_decrypt(nmp->evp_cipher, counter_remote,
                       header, sizeof(struct nmp_transport),
                       ciphertext, payload_len,
-                      mac, ctx->payload))
+                      mac, plaintext))
     {
         log("decryption failed %xu", header->type_pad_id.session_id);
         return -1;
@@ -2286,36 +2279,26 @@ static i32 session_transport_receive(struct nmp_data *nmp, struct session *ctx,
 static u32 session_request(struct nmp_data *nmp, struct session *ctx)
 {
     assert(ctx->state == SESSION_STATUS_NONE);
-    struct session_initiation *initiation = &ctx->initiation;
+    assert(ctx->initiation);
+
+    struct session_initiation *initiation = ctx->initiation;
 
     initiation->payload[0].timestamp = time_get();
     if (initiation->payload[0].timestamp == 0)
-    {
         return 1;
-    }
 
-    initiation->buf_request.header = header_initialize(NMP_REQUEST, ctx->session_id);
+
+    initiation->send_buf.request.header = header_initialize(NMP_REQUEST, ctx->session_id);
     if (noise_initiator_write(&initiation->handshake,
-                              &initiation->buf_request.initiator,
-                              &initiation->buf_request, sizeof(struct nmp_header),
-                              (u8 *) &ctx->initiation.payload[0]))
-    {
+                              &initiation->send_buf.request.initiator,
+                              &initiation->send_buf.request, sizeof(struct nmp_header),
+                              (u8 *) &initiation->payload[0]))
         return 1;
-    }
 
-
-    struct nmp_buf_send *buf = nmp_ring_send_buf(nmp, ctx);
-    if (buf == NULL)
-    {
+    if (nmp_ring_send(nmp, &initiation->send_buf, sizeof(struct nmp_request), &ctx->addr))
         return 1;
-    }
 
-    mem_copy(buf->data, &initiation->buf_request, sizeof(struct nmp_request));
-    if (nmp_ring_send(nmp, buf, sizeof(struct nmp_request), &ctx->addr))
-    {
-        return 1;
-    }
-
+    ctx->state = SESSION_STATUS_RESPONSE;
     ctx->stat_tx += sizeof(struct nmp_request);
     return nmp_ring_timer_set(nmp, ctx, SESSION_TIMER_RETRY);
 }
@@ -2324,44 +2307,28 @@ static u32 session_request(struct nmp_data *nmp, struct session *ctx)
 static u32 session_response(struct nmp_data *nmp, struct session *ctx)
 {
     assert(ctx->state == SESSION_STATUS_NONE);
-    struct session_initiation *initiation = &ctx->initiation;
-    initiation->buf_response.header = header_initialize(NMP_RESPONSE, ctx->session_id);
+    assert(ctx->initiation);
+
+    struct session_initiation *initiation = ctx->initiation;
+    initiation->send_buf.response.header = header_initialize(NMP_RESPONSE, ctx->session_id);
     initiation->payload[1].timestamp = 0;
 
     if (noise_responder_write(&initiation->handshake,
-                              &initiation->buf_response.responder,
-                              &initiation->buf_response.header, sizeof(struct nmp_header),
+                              &initiation->send_buf.response.responder,
+                              &initiation->send_buf.response.header, sizeof(struct nmp_header),
                               (u8 *) &initiation->payload[1]))
-    {
         return 1;
-    }
 
-    struct nmp_buf_send *buf = nmp_ring_send_buf(nmp, ctx);
-    if (buf == NULL)
-    {
+    if (nmp_ring_send(nmp, &initiation->send_buf, sizeof(struct nmp_response), &ctx->addr))
         return 1;
-    }
-
-    mem_copy(buf->data, &initiation->buf_response, sizeof(struct nmp_response));
-    if (nmp_ring_send(nmp, buf, sizeof(struct nmp_response), &ctx->addr))
-    {
-        return 1;
-    }
 
 
-    // wait one keepalive interval for initiator to send data
-    // respond up to SESSION_RESPONSE_RETRY times to initiator requests
-    if (ctx->state != SESSION_STATUS_CONFIRM)
-    {
-        // using default keepalive value here as this
-        // wants to wait for the first data packet
-        if (nmp_ring_timer_set(nmp, ctx, SESSION_TIMER_KEEPALIVE))
-            return 1;
-    }
-
+    ctx->state = SESSION_STATUS_CONFIRM;
     ctx->stat_tx += sizeof(struct nmp_response);
-    return 0;
+    ctx->response_retries = 0;
+    return nmp_ring_timer_set(nmp, ctx, SESSION_TIMER_RETRY);;
 }
+
 
 /*
  *  this is triggered by a local event
@@ -2378,9 +2345,9 @@ static u32 session_data(struct nmp_data *nmp, struct session *ctx)
 
     for (;;)
     {
-        const i32 amt = msg_assemble(&ctx->transport,
-                                     ctx->payload,
-                                     nmp->payload);
+        u8 payload[MSG_MAX_PAYLOAD];
+
+        const i32 amt = msg_assemble(&ctx->transport, payload, nmp->payload);
         switch (amt)
         {
             case 0:
@@ -2404,18 +2371,14 @@ static u32 session_data(struct nmp_data *nmp, struct session *ctx)
                 if (ctx->state == SESSION_STATUS_ESTAB)
                 {
                     if (nmp_ring_timer_update(nmp, ctx, SESSION_TIMER_RETRY))
-                    {
                         return 1;
-                    }
 
                     ctx->state = SESSION_STATUS_ACKWAIT;
                 }
 
                 if (session_transport_send(nmp, ctx,
-                                           ctx->payload, amt, NMP_DATA))
-                {
+                                           payload, amt, NMP_DATA))
                     return 1;
-                }
 
                 break;
             }
@@ -2431,10 +2394,12 @@ static u32 session_data(struct nmp_data *nmp, struct session *ctx)
  */
 static u32 session_data_retry(struct nmp_data *nmp, struct session *ctx)
 {
+    u8 payload[MSG_MAX_PAYLOAD];
+
     const u32 amt = msg_assemble_retry(&ctx->transport,
-                                       ctx->payload, nmp->payload);
+                                       payload, nmp->payload);
     return amt ? session_transport_send(nmp, ctx,
-                                        ctx->payload, (i32) amt, NMP_DATA)
+                                        payload, (i32) amt, NMP_DATA)
                : 0;
 }
 
@@ -2477,10 +2442,6 @@ static u32 session_ack(struct nmp_data *nmp, struct session *ctx)
 }
 
 
-/*
- *  send an empty packet to
- *  keep this connection alive
- */
 static u32 session_keepalive(struct nmp_data *nmp, struct session *ctx)
 {
     assert(ctx->state == SESSION_STATUS_ESTAB);
@@ -2567,10 +2528,8 @@ static i32 event_local_connect(struct nmp_data *nmp,
 
         const union nmp_status_container cancelled = {.session_id = request->session};
         if (nmp->status_cb)
-        {
             nmp->status_cb(NMP_SESSION_MAX,
                            &cancelled, ctx->context_ptr);
-        }
 
         session_destroy(ctx);
         return 0;
@@ -2578,14 +2537,10 @@ static i32 event_local_connect(struct nmp_data *nmp,
 
     if (hash_table_insert(&nmp->sessions,
                           ctx->session_id, ctx))
-    {
         return -1;
-    }
 
     if (session_request(nmp, ctx))
-    {
         return -1;
-    }
 
     ctx->state = SESSION_STATUS_RESPONSE;
     return 0;
@@ -2619,9 +2574,7 @@ static i32 event_local(struct nmp_data *nmp,
     {
         log("updating local multishot receive");
         if (nmp_ring_recv_local(nmp))
-        {
             return 1;
-        }
 
         goto out;
     }
@@ -2639,9 +2592,7 @@ static i32 event_local(struct nmp_data *nmp,
         {
             log("dropping local request: ctx not found");
             if (request->payload_ptr)
-            {
                 mem_free(request->payload_ptr);
-            }
 
             goto out;
         }
@@ -2685,6 +2636,7 @@ static i32 event_local(struct nmp_data *nmp,
 ///////////////////////////////
 ///     timer events        ///
 ///////////////////////////////
+
 
 static u32 event_timer(struct nmp_data *nmp,
                        struct session *ctx)
@@ -2735,14 +2687,10 @@ static u32 event_timer(struct nmp_data *nmp,
 
         case SESSION_STATUS_RESPONSE:
         {
-            // retry sending initiator:
-            // just take a stored copy
-            struct nmp_buf_send *buf = nmp_ring_send_buf(nmp, ctx);
-            if (buf == NULL)
-                return 1;
+            assert(ctx->initiation);
 
-            mem_copy(buf->data, &ctx->initiation.buf_request, sizeof(struct nmp_request));
-            if (nmp_ring_send(nmp, buf, sizeof(struct nmp_request), &ctx->addr))
+            if (nmp_ring_send(nmp, &ctx->initiation->send_buf,
+                              sizeof(struct nmp_request), &ctx->addr))
                 return 1;
 
             ctx->stat_tx += sizeof(struct nmp_request);
@@ -2751,12 +2699,14 @@ static u32 event_timer(struct nmp_data *nmp,
 
         case SESSION_STATUS_CONFIRM:
         {
-            // this means connection timed out, and we didn't
-            // get any data after sending response(s)
-            const union nmp_status_container latest = {.msg_id = msg_latest_acked(&ctx->transport)};
-            session_drop(nmp, ctx, NMP_SESSION_DISCONNECTED, &latest);
-            session_destroy(ctx);
-            return 0;
+            assert(ctx->initiation);
+
+            if (nmp_ring_send(nmp, &ctx->initiation->send_buf,
+                              sizeof(struct nmp_response), &ctx->addr))
+                return 1;
+
+            ctx->stat_tx += sizeof(struct nmp_response);
+            break;
         }
 
         default:
@@ -2778,33 +2728,31 @@ static u32 event_timer(struct nmp_data *nmp,
 
 
 static i32 event_net_data(struct nmp_data *nmp, struct session *ctx,
-                          const u32 payload)
+                          const u8 *payload, const u32 payload_len)
 {
     assert(ctx->state != SESSION_STATUS_NONE);
 
     if (ctx->state == SESSION_STATUS_CONFIRM)
     {
+        assert(ctx->initiation);
+
         ctx->state = SESSION_STATUS_ESTAB;
         ctx->response_retries = 0;
-        if (noise_state_del(&ctx->initiation.handshake))
-            return 1; // fixme
+        if (noise_state_del(&ctx->initiation->handshake))
+            return 1;
 
-        mem_zero(ctx->payload, sizeof(struct session_initiation));
+        mem_free(ctx->initiation);
 
         if (nmp->status_cb)
-        {
             nmp->status_cb(NMP_SESSION_INCOMING, NULL, ctx->context_ptr);
-        }
 
         // there could be a custom interval set, update needed
         if (nmp_ring_timer_update(nmp, ctx, nmp->keepalive_interval))
-        {
             return -1;
-        }
     }
 
     // skip empty + reset the counter
-    if (payload == 0)
+    if (payload_len == 0)
     {
         ctx->timer_retries = 0;
         return 0;
@@ -2812,7 +2760,7 @@ static i32 event_net_data(struct nmp_data *nmp, struct session *ctx,
 
     const i32 new_messages = msg_read(&nmp->transport_callbacks,
                                       &ctx->transport,
-                                      ctx->payload, payload);
+                                      payload, payload_len);
     switch (new_messages)
     {
         case -1:
@@ -2846,10 +2794,11 @@ static i32 event_net_data(struct nmp_data *nmp, struct session *ctx,
 }
 
 
-static u32 event_net_ack(struct nmp_data *nmp, struct session *ctx, const u32 payload)
+static u32 event_net_ack(struct nmp_data *nmp, struct session *ctx,
+                         const u8 *payload, const u32 payload_len)
 {
     assert(ctx->state != SESSION_STATUS_NONE);
-    if (payload != sizeof(struct msg_ack))
+    if (payload_len != sizeof(struct msg_ack))
     {
         // this ack did not fail authentication,
         // but we cant read it, something is going on
@@ -2866,7 +2815,7 @@ static u32 event_net_ack(struct nmp_data *nmp, struct session *ctx, const u32 pa
         return 0;
     }
 
-    const struct msg_ack *ack = (struct msg_ack *) ctx->payload;
+    const struct msg_ack *ack = (struct msg_ack *) payload;
     const i32 acks = msg_ack_read(&ctx->transport, ack);
     if (acks < 0)
     {
@@ -2880,7 +2829,7 @@ static u32 event_net_ack(struct nmp_data *nmp, struct session *ctx, const u32 pa
 
 static i32 event_net_request(struct nmp_data *nmp,
                              const u32 id, const union nmp_sa *addr,
-                             const struct nmp_request *request, const u32 len)
+                             struct nmp_request *request, const u32 len)
 {
     if (nmp->request_cb == NULL)
     {
@@ -2958,19 +2907,15 @@ static i32 event_net_request(struct nmp_data *nmp,
             // note: no owner of this buffer is specified
             // which means we won't notify application if
             // this send fails
-            struct nmp_buf_send *buf = nmp_ring_send_buf(nmp, NULL);
+            struct nmp_buf_send *buf = nmp_ring_send_buf(nmp);
             if (buf == NULL)
-            {
                 return -1;
-            }
 
             buf->response.header = header_initialize(NMP_RESPONSE, id);
             if (noise_responder_write(&handshake, &buf->response.responder,
                                       &buf->response.header, sizeof(struct nmp_header),
                                       request_container.response_payload))
-            {
                 return -1;
-            }
 
             return nmp_ring_send(nmp, buf, sizeof(struct nmp_response), addr) ? -1 : 0;
         }
@@ -2984,20 +2929,20 @@ static i32 event_net_request(struct nmp_data *nmp,
     }
 
 
-    ctx = session_new(nmp);
+    ctx = session_new();
     if (ctx == NULL)
-    {
         return -1;
-    }
 
     ctx->context_ptr = request_container.context_ptr;
     ctx->addr = *addr;
     ctx->session_id = id;
     ctx->stat_rx += sizeof(struct nmp_request);
 
-    mem_copy(ctx->initiation.payload[1].data,
+    struct session_initiation *initiation = ctx->initiation;
+
+    mem_copy(initiation->payload[1].data,
              request_container.response_payload, NMP_INITIATION_PAYLOAD);
-    ctx->initiation.handshake = handshake;
+    initiation->handshake = handshake;
 
     if (session_response(nmp, ctx))
     {
@@ -3006,14 +2951,24 @@ static i32 event_net_request(struct nmp_data *nmp,
     }
 
     if (hash_table_insert(&nmp->sessions, id, ctx))
-    {
         return -1;
-    }
 
-    ctx->state = SESSION_STATUS_CONFIRM;
-    noise_split(&ctx->initiation.handshake,
-                ctx->noise_key_receive,
-                ctx->noise_key_send);
+    u8 k_recv[NOISE_KEYLEN];
+    u8 k_send[NOISE_KEYLEN];
+
+    noise_split(&initiation->handshake,
+                k_recv,
+                k_send);
+
+
+    if (EVP_DecryptInit_ex(ctx->noise_key_receive, EVP_chacha20_poly1305(),
+                           NULL, k_recv, NULL) != 1)
+        return -1;
+
+    if (EVP_EncryptInit_ex(ctx->noise_key_send, EVP_chacha20_poly1305(),
+                           NULL, k_send, NULL) != 1)
+        return -1;
+
     ctx->noise_counter_receive = 0;
     ctx->noise_counter_send = 0;
     return 0;
@@ -3021,7 +2976,7 @@ static i32 event_net_request(struct nmp_data *nmp,
 
 
 static u32 event_net_response(struct nmp_data *nmp, const u32 session_id,
-                              const struct nmp_response *response, const u32 amt)
+                              struct nmp_response *response, const u32 amt)
 {
     if (nmp->status_cb == NULL)
     {
@@ -3048,32 +3003,53 @@ static u32 event_net_response(struct nmp_data *nmp, const u32 session_id,
         return 0;
     }
 
-    if (noise_responder_read(&ctx->initiation.handshake,
+    struct session_initiation *initiation = ctx->initiation;
+    if (noise_responder_read(&initiation->handshake,
                              &response->responder,
                              &response->header, sizeof(struct nmp_header),
-                             (u8 *) &ctx->initiation.payload[1]))
+                             (u8 *) &initiation->payload[1]))
     {
         log("failed to read response for %xu", ctx->session_id);
         return 0;
     }
 
     switch (nmp->status_cb(NMP_SESSION_RESPONSE,
-                           (const union nmp_status_container *) &ctx->initiation.payload[1].data,
+                           (const union nmp_status_container *) &initiation->payload[1].data,
                            ctx->context_ptr))
     {
         case NMP_CMD_ACCEPT:
         {
+            u8 k_recv[NOISE_KEYLEN];
+            u8 k_send[NOISE_KEYLEN];
+
             ctx->noise_counter_send = 0;
             ctx->noise_counter_receive = 0;
-            noise_split(&ctx->initiation.handshake,
-                        ctx->noise_key_send,
-                        ctx->noise_key_receive);
+            noise_split(&initiation->handshake,
+                        k_send,
+                        k_recv);
 
-            mem_zero(&ctx->payload, sizeof(struct session_initiation));
+            if (EVP_EncryptInit_ex(ctx->noise_key_send, EVP_chacha20_poly1305(),
+                                   NULL, k_send, NULL) != 1)
+                return 1;
+
+            if (EVP_DecryptInit_ex(ctx->noise_key_receive, EVP_chacha20_poly1305(),
+                                   NULL, k_recv, NULL) != 1)
+                return 1;
+
+            mem_zero(ctx->initiation, sizeof(struct session_initiation));
+            mem_free(ctx->initiation);
+
             break;
         }
 
         case NMP_CMD_DROP:
+        {
+            // no point having this session anymore
+            hash_table_remove(&nmp->sessions, ctx->session_id);
+            ctx->state = SESSION_STATUS_NONE;
+            return 0;
+        }
+
         default:
         {
             log("application did not accept response %xu", ctx->session_id);
@@ -3084,8 +3060,6 @@ static u32 event_net_response(struct nmp_data *nmp, const u32 session_id,
 
     // checks completed
     ctx->state = SESSION_STATUS_ESTAB;
-    if (noise_state_del(&ctx->initiation.handshake))
-        return 1;
 
     // try to send early data
     switch (session_data(nmp, ctx))
@@ -3119,7 +3093,7 @@ static u32 event_net_response(struct nmp_data *nmp, const u32 session_id,
  *  -1 indicating error
  */
 static struct session *event_net_collect(struct nmp_data *nmp,
-                                         const struct nmp_header *packet, const u32 packet_len,
+                                         struct nmp_header *packet, const u32 packet_len,
                                          const union nmp_sa *addr)
 {
     const struct nmp_header header = *packet;
@@ -3143,14 +3117,14 @@ static struct session *event_net_collect(struct nmp_data *nmp,
             case NMP_REQUEST:
             {
                 event_net_request(nmp, header.session_id, addr,
-                                  (const struct nmp_request *) packet, packet_len);
+                                  (struct nmp_request *) packet, packet_len);
                 return NULL;
             }
 
             case NMP_RESPONSE:
             {
                 event_net_response(nmp, header.session_id,
-                                   (const struct nmp_response *) packet, packet_len);
+                                   (struct nmp_response *) packet, packet_len);
                 return NULL;
             }
         }
@@ -3179,12 +3153,12 @@ static struct session *event_net_collect(struct nmp_data *nmp,
         return NULL;
     }
 
-    const i32 payload = session_transport_receive(nmp, ctx,
-                                                  (const u8 *) packet, packet_len);
-    if (payload < 0)
-    {
+    u8 payload[MSG_MAX_PAYLOAD];
+    const i32 payload_len = session_transport_receive(nmp, ctx,
+                                                      (u8 *) packet, packet_len,
+                                                      payload);
+    if (payload_len < 0)
         return NULL;
-    }
 
 
     // process ready packets
@@ -3192,11 +3166,9 @@ static struct session *event_net_collect(struct nmp_data *nmp,
     {
         case NMP_DATA:
         {
-            const i32 result = event_net_data(nmp, ctx, payload);
+            const i32 result = event_net_data(nmp, ctx, payload, payload_len);
             if (result <= 0)
-            {
                 return NULL;
-            }
 
             ctx->events |= SESSION_EVENT_DATA;
             break;
@@ -3204,10 +3176,8 @@ static struct session *event_net_collect(struct nmp_data *nmp,
 
         case NMP_ACK:
         {
-            if (!event_net_ack(nmp, ctx, payload))
-            {
+            if (!event_net_ack(nmp, ctx, payload, payload_len))
                 return NULL;
-            }
 
             ctx->events |= SESSION_EVENT_ACK;
             break;
@@ -3248,9 +3218,7 @@ static u32 event_net_deliver(struct nmp_data *nmp,
         // new data has been received, so it is irrelevant if those
         // messages were delivered or not, we must send out ack here
         if (session_ack(nmp, ctx))
-        {
             return 1;
-        }
 
         ctx->response_retries = 0;
     }
@@ -3269,9 +3237,7 @@ static u32 event_net_deliver(struct nmp_data *nmp,
                 // everything has been acked
                 ctx->state = SESSION_STATUS_ESTAB;
                 if (nmp_ring_timer_update(nmp, ctx, nmp->keepalive_interval))
-                {
                     return 1;
-                }
 
                 break;
             }
@@ -3282,9 +3248,7 @@ static u32 event_net_deliver(struct nmp_data *nmp,
                 // data transmission to fill the window back up
                 ctx->state = SESSION_STATUS_ACKWAIT;
                 if (session_data(nmp, ctx))
-                {
                     return 1;
-                }
 
                 break;
             }
@@ -3456,7 +3420,7 @@ struct nmp_data *nmp_new(const struct nmp_conf *conf)
 
     tmp->retries[SESSION_STATUS_NONE] = 0;
     tmp->retries[SESSION_STATUS_RESPONSE] = SESSION_TIMER_RETRIES_MAX;
-    tmp->retries[SESSION_STATUS_CONFIRM] = 2;
+    tmp->retries[SESSION_STATUS_CONFIRM] = SESSION_TIMER_RETRIES_MAX;
     tmp->retries[SESSION_STATUS_WINDOW] = SESSION_TIMER_RETRIES_MAX;
     tmp->retries[SESSION_STATUS_ESTAB] = ka_max;
     tmp->retries[SESSION_STATUS_ACKWAIT] = SESSION_TIMER_RETRIES_MAX;
@@ -3474,6 +3438,10 @@ struct nmp_data *nmp_new(const struct nmp_conf *conf)
     tmp->transport_callbacks.data = conf->data_noack_cb;
     tmp->transport_callbacks.ack = conf->ack_cb;
 
+    tmp->evp_hmac = HMAC_CTX_new();
+    if (tmp->evp_hmac == NULL)
+        goto fail;
+
     tmp->evp_md_ctx = EVP_MD_CTX_new();
     if (tmp->evp_md_ctx == NULL)
         goto fail;
@@ -3484,6 +3452,7 @@ struct nmp_data *nmp_new(const struct nmp_conf *conf)
 
     noise_keypair_initialize(&tmp->static_keys, conf->key);
     noise_responder_init(&tmp->responder_precomp,
+                         tmp->evp_hmac,
                          tmp->evp_md_ctx,
                          tmp->evp_cipher,
                          &tmp->static_keys);
@@ -3562,7 +3531,7 @@ u32 nmp_connect(struct nmp_data *nmp, const u8 *pub, const union nmp_sa *addr,
         return 0;
     }
 
-    struct session *ctx_new = session_new(nmp);
+    struct session *ctx_new = session_new();
     if (ctx_new == NULL)
     {
         log_errno();
@@ -3572,14 +3541,15 @@ u32 nmp_connect(struct nmp_data *nmp, const u8 *pub, const union nmp_sa *addr,
     ctx_new->context_ptr = ctx;
     ctx_new->session_id = id;
     ctx_new->addr = *addr;
-    noise_initiator_init(&ctx_new->initiation.handshake,
+    noise_initiator_init(&ctx_new->initiation->handshake,
+                         nmp->evp_hmac,
                          nmp->evp_md_ctx,
                          nmp->evp_cipher,
                          &nmp->static_keys, pub);
 
     if (payload)
     {
-        mem_copy(&ctx_new->initiation.payload[0].data,
+        mem_copy(ctx_new->initiation->payload[0].data,
                  payload, payload_len);
     }
 
@@ -3778,7 +3748,9 @@ u32 nmp_run(struct nmp_data *nmp, const i32 timeout)
         {
             if (cqes[i]->res < 0)
             {
-                log("cqe status %s", strerrorname_np(-cqes[i]->res));
+                log("cqe status %s (%p)",
+                    strerrorname_np(-cqes[i]->res),
+                    io_uring_cqe_get_data(cqes[i]));
                 u32 crit = 0;
 
                 switch (-cqes[i]->res)
