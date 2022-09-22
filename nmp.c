@@ -937,8 +937,6 @@ static i32 msg_ack_read(struct msg_state *ctx, const struct msg_ack *ack)
                 struct msg_tx *msg = tx_get(ctx, i);
                 if (msg->status == MSG_TX_SENT)
                 {
-                    log("acked %u", msg->seq);
-
                     msg->status = MSG_TX_ACKED;
                     discovered += 1;
                 }
@@ -970,6 +968,8 @@ static i32 msg_deliver_ack(const struct msg_routines *cb,
         struct msg_tx *msg = tx_get(ctx, i);
         if (msg->status != MSG_TX_ACKED)
             break;
+
+        log("delivering ack %u", msg->seq);
 
         if (cb->ack)
             cb->ack(msg->id, ctx->context_ptr);
@@ -2188,10 +2188,11 @@ static u32 session_transport_send(struct nmp_data *nmp, struct session *ctx,
     u8 *ciphertext = packet + sizeof(struct nmp_transport);
     u8 *mac = ciphertext + amt;
 
-    noise_encrypt(nmp->evp_cipher, ctx->noise_counter_send,
-                  &buf->transport, sizeof(struct nmp_transport),
-                  payload, amt,
-                  ciphertext, mac);
+    if (noise_encrypt(nmp->evp_cipher, ctx->noise_counter_send,
+                      &buf->transport, sizeof(struct nmp_transport),
+                      payload, amt,
+                      ciphertext, mac))
+        return 1;
 
     if (nmp_ring_send(nmp, ctx, buf, packet_len, &ctx->addr))
         return 1;
@@ -2762,9 +2763,7 @@ static i32 event_net_data(struct nmp_data *nmp, struct session *ctx,
         }
 
         default:
-        {
             return new_messages;
-        }
     }
 }
 
@@ -3315,6 +3314,12 @@ static u32 nmp_destroy(struct nmp_data *nmp)
     if (nmp->evp_md_ctx)
         EVP_MD_CTX_free(nmp->evp_md_ctx);
 
+    if (nmp->evp_cipher)
+        EVP_CIPHER_CTX_free(nmp->evp_cipher);
+
+    if (nmp->evp_hmac)
+        HMAC_CTX_free(nmp->evp_hmac);
+
     const i32 descriptors[] =
             {
                     nmp->net_udp,
@@ -3406,7 +3411,7 @@ struct nmp_data *nmp_new(const struct nmp_conf *conf)
     tmp->stats_cb = conf->stats_cb;
 
     tmp->transport_callbacks.data = conf->data_cb;
-    tmp->transport_callbacks.data = conf->data_noack_cb;
+    tmp->transport_callbacks.data_noack = conf->data_noack_cb;
     tmp->transport_callbacks.ack = conf->ack_cb;
 
     tmp->evp_hmac = HMAC_CTX_new();
@@ -3432,6 +3437,7 @@ struct nmp_data *nmp_new(const struct nmp_conf *conf)
     struct io_uring_params params = {0};
     params.cq_entries = RING_CQ;
     params.flags = 0
+                   | IORING_SETUP_SINGLE_ISSUER
                    | IORING_SETUP_SUBMIT_ALL
                    | IORING_SETUP_COOP_TASKRUN
                    | IORING_SETUP_CQSIZE;
@@ -3702,8 +3708,12 @@ static u32 nmp_cqe_err(struct nmp_data *nmp, struct io_uring_cqe *cqe)
             break;
         }
 
-        case EPERM: // todo
+        case EPERM:
+        {
+            // todo
+
             return 0;
+        }
 
         default:
             return 1;
@@ -3716,7 +3726,6 @@ static u32 nmp_cqe_err(struct nmp_data *nmp, struct io_uring_cqe *cqe)
 u32 nmp_run(struct nmp_data *nmp, const i32 timeout)
 {
     UNUSED(timeout); // fixme
-    void *net_ptr = &nmp->net_udp;
 
     for (;;)
     {
@@ -3768,10 +3777,26 @@ u32 nmp_run(struct nmp_data *nmp, const i32 timeout)
                 return 1;
             }
 
+            i32 result = 0;
             struct session *ctx = NULL;
-            const i32 result = (io_uring_cqe_get_data(cqes[i]) == net_ptr) ?
-                               event_network(nmp, cqes[i], &ctx) :
-                               event_local(nmp, cqes[i], &ctx);
+
+            for (;;)
+            {
+                if (io_uring_cqe_get_data(cqes[i]) == &nmp->net_udp)
+                {
+                    result = event_network(nmp, cqes[i], &ctx);
+                    break;
+                }
+
+                if (io_uring_cqe_get_data(cqes[i]) == &nmp->local_rx)
+                {
+                    result = event_local(nmp, cqes[i], &ctx);
+                    break;
+                }
+
+                log("unrecognized buffer group");
+                return 1;
+            }
 
             switch (result)
             {
