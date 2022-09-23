@@ -126,14 +126,24 @@ static u64 time_get()
 
 
 /*
- *  randomness
+ *  https://man7.org/linux/man-pages/man2/getrandom.2.html
+ *  lets take advantage of nice things man page says about
+ *  requests of up to 256 bytes
  */
-static u32 rnd_get(void *output, const u32 amt)
-{
-    while (getrandom(output, amt, 0) != amt)
-    {
-        log_errno();
+#define RND_POOL_SIZE   256
 
+struct rnd_pool
+{
+    u32 offset;
+    u8 pool[RND_POOL_SIZE];
+};
+
+
+static u32 rnd_reset_pool(struct rnd_pool *rnd)
+{
+    while (getrandom(rnd->pool, RND_POOL_SIZE, 0)
+           != RND_POOL_SIZE)
+    {
         // none of this ever happens
         // but lets check anyway
         switch (errno)
@@ -146,17 +156,36 @@ static u32 rnd_get(void *output, const u32 amt)
         }
     }
 
+    rnd->offset = 0;
     return 0;
 }
 
 
-static u32 rnd_get32()
+static u32 rnd_get_bytes(struct rnd_pool *rnd, void *out, const u32 amt)
+{
+    assert(amt <= RND_POOL_SIZE);
+
+    if (rnd->offset + amt > RND_POOL_SIZE)
+    {
+        if (rnd_reset_pool(rnd))
+            return 1;
+    }
+
+    mem_copy(out, rnd->pool + rnd->offset, amt);
+    mem_zero(rnd->pool + rnd->offset, amt);
+
+    rnd->offset += amt;
+    return 0;
+}
+
+
+static u32 rnd_get32(struct rnd_pool *rnd)
 {
     u32 tmp = 0;
 
     while (!tmp)
     {
-        if (rnd_get(&tmp, sizeof(u32)))
+        if (rnd_get_bytes(rnd, &tmp, sizeof(u32)))
             return 0;
     }
 
@@ -1052,6 +1081,7 @@ struct noise_keypair
 
 struct noise_handshake
 {
+    struct rnd_pool *rnd;
     HMAC_CTX *evp_hmac;
     EVP_MD_CTX *evp_md;
     EVP_CIPHER_CTX *evp_cipher;
@@ -1194,10 +1224,11 @@ static inline u32 noise_keypair_initialize(struct noise_keypair *pair,
 
 
 static u32 noise_keypair_generate(EVP_MD_CTX *evp_md,
+                                  struct rnd_pool *rnd,
                                   struct noise_keypair *pair)
 {
     u8 buf[NOISE_HASHLEN] = {0};
-    if (rnd_get(&buf, sizeof(buf)))
+    if (rnd_get_bytes(rnd, &buf, sizeof(buf)))
         return 1;
 
     u8 hash[NOISE_HASHLEN] = {0};
@@ -1412,23 +1443,32 @@ static u32 noise_split(const struct noise_handshake *state,
 }
 
 
-static u32 noise_initiator_init(struct noise_handshake *state,
-                                HMAC_CTX *evp_hmac,
-                                EVP_MD_CTX *evp_md,
-                                EVP_CIPHER_CTX *evp_cipher,
-                                struct noise_keypair *s,
-                                const u8 *rs)
+static u32 noise_state_init(HMAC_CTX *evp_hmac,
+                            EVP_MD_CTX *evp_md,
+                            EVP_CIPHER_CTX *evp_cipher,
+                            struct rnd_pool *rnd,
+                            struct noise_handshake *state,
+                            struct noise_keypair *s,
+                            const u8 *rs)
 {
     state->evp_hmac = evp_hmac;
-    state->evp_cipher = evp_cipher;
     state->evp_md = evp_md;
+    state->evp_cipher = evp_cipher;
+    state->rnd = rnd;
+    state->s = s;
+
     mem_copy(state->symmetric_h, noise_protocol_name, NOISE_HASHLEN);
     mem_copy(state->symmetric_ck, noise_protocol_name, NOISE_HASHLEN);
-
-    state->s = s;
     mem_copy(state->rs, rs, NOISE_DHLEN);
 
     return noise_mix_hash(state, rs, NOISE_DHLEN);
+}
+
+
+static void noise_state_del(struct noise_handshake *state)
+{
+    log("cleaning up state %p", state->e.evp_priv);
+    noise_keypair_del(&state->e);
 }
 
 
@@ -1441,7 +1481,7 @@ static u32 noise_initiator_write(struct noise_handshake *state,
         return 1;
 
     // e
-    if (noise_keypair_generate(state->evp_md, &state->e))
+    if (noise_keypair_generate(state->evp_md, state->rnd, &state->e))
         return 1;
 
     mem_copy(initiator->ephemeral, state->e.public, NOISE_DHLEN);
@@ -1497,24 +1537,6 @@ static u32 noise_responder_read(struct noise_handshake *state,
 }
 
 
-static u32 noise_responder_init(struct noise_handshake *state,
-                                HMAC_CTX *evp_hmac,
-                                EVP_MD_CTX *evp_md,
-                                EVP_CIPHER_CTX *evp_cipher,
-                                struct noise_keypair *s)
-{
-    state->evp_hmac = evp_hmac;
-    state->evp_cipher = evp_cipher;
-    state->evp_md = evp_md;
-    state->s = s;
-
-    mem_copy(state->symmetric_h, noise_protocol_name, NOISE_HASHLEN);
-    mem_copy(state->symmetric_ck, noise_protocol_name, NOISE_HASHLEN);
-
-    return noise_mix_hash(state, s->public, NOISE_DHLEN);
-}
-
-
 static u32 noise_initiator_read(struct noise_handshake *state,
                                 struct noise_initiator *initiator,
                                 const void *ad, const u32 ad_len,
@@ -1560,7 +1582,7 @@ static u32 noise_responder_write(struct noise_handshake *state,
         return 1;
 
     // e
-    if (noise_keypair_generate(state->evp_md, &state->e))
+    if (noise_keypair_generate(state->evp_md, state->rnd, &state->e))
         return 1;
 
     mem_copy(responder->ephemeral, state->e.public, NOISE_DHLEN);
@@ -1579,15 +1601,6 @@ static u32 noise_responder_write(struct noise_handshake *state,
     return noise_encrypt_and_hash(state,
                                   payload, NOISE_HANDSHAKE_PAYLOAD,
                                   responder->encrypted_payload, responder->mac);
-}
-
-
-static u32 noise_state_del(struct noise_handshake *state)
-{
-    log("cleaning up state %p", state->e.evp_priv);
-
-    noise_keypair_del(&state->e);
-    return 0;
 }
 
 
@@ -1633,9 +1646,9 @@ static i32 noise_counter_validate(const u32 block[8],
 // did not contain any new messages
 #define SESSION_RESPONSE_RETRY      10
 
-#define SESSION_EVENT_QUEUED        1   // is this context in queue?
-#define SESSION_EVENT_ACK           2   // new acks arrived
-#define SESSION_EVENT_DATA          4   // new message available
+#define SESSION_EVENT_QUEUED        (1u << 1)   // is this context in queue?
+#define SESSION_EVENT_ACK           (1u << 2)   // new acks arrived
+#define SESSION_EVENT_DATA          (1u << 3)   // new message available
 
 #define SESSION_TIMER_RETRY         1   // interval for retransmissions
 #define SESSION_TIMER_KEEPALIVE     NMP_KEEPALIVE_DEFAULT // @nmp.h
@@ -1661,14 +1674,6 @@ static i32 noise_counter_validate(const u32 block[8],
                         .type = (type_),                    \
                         .pad = {0,0,0},                     \
                         .session_id = (id_)}
-
-static_assert(NMP_KEYLEN == NOISE_DHLEN, "keylen");
-static_assert(NMP_PAYLOAD_MAX == MSG_MAX_SINGLE, "payload");
-
-static_assert_pow2(RING_BATCH);
-static_assert_pow2(RING_SQ);
-static_assert_pow2(RING_CQ);
-static_assert_pow2(RING_RECV_BUFFERS);
 
 
 struct nmp_header
@@ -1721,6 +1726,15 @@ enum session_status
     SESSION_STATUS_ESTAB = 4,    // established connection
     SESSION_STATUS_ACKWAIT = 5   // some data is in transit
 };
+
+
+struct nmp_init_payload
+{
+    u64 timestamp;
+    u8 reserved[24];
+    u8 data[NMP_INITIATION_PAYLOAD];
+};
+
 
 struct nmp_buf_send
 {
@@ -1781,19 +1795,9 @@ struct nmp_recv_local
 struct session_initiation
 {
     struct noise_handshake handshake;
-    struct
-    {
-        u64 timestamp;
-        u8 data[NMP_INITIATION_PAYLOAD];
+    struct nmp_init_payload payload[2];
 
-    } payload[2];
-
-    union
-    {
-        struct nmp_request request;
-        struct nmp_response response;
-
-    } recv_buf;
+    // fixme
 
     struct nmp_buf_send send_buf;
 };
@@ -1846,10 +1850,6 @@ struct nmp_data
     sa_family_t sa_family;
     u8 retries[6];
 
-    HMAC_CTX *evp_hmac;
-    EVP_MD_CTX *evp_md_ctx;
-    EVP_CIPHER_CTX *evp_cipher;
-
     void *request_context;
     enum nmp_status (*request_cb)(const u8 *,
                                   struct nmp_request_container *, void *);
@@ -1860,12 +1860,30 @@ struct nmp_data
     struct msg_routines transport_callbacks;
     struct noise_keypair static_keys;
 
+    struct rnd_pool rnd_lib;
+    struct rnd_pool rnd_pub;
+
     u32 send_iter;
     struct nmp_buf_send send_bufs[RING_BATCH];
 
     struct hash_table sessions;
-    struct noise_handshake responder_precomp;
+
+    HMAC_CTX *evp_hmac;
+    EVP_MD_CTX *evp_md;
+    EVP_CIPHER_CTX *evp_cipher;
+    struct noise_handshake noise_precomp;
 };
+
+
+static_assert(NMP_KEYLEN == NOISE_DHLEN, "keylen");
+static_assert(NMP_PAYLOAD_MAX == MSG_MAX_SINGLE, "payload");
+static_assert(sizeof(struct nmp_init_payload) == NOISE_HANDSHAKE_PAYLOAD, "initiation payload");
+
+static_assert_pow2(RING_BATCH);
+static_assert_pow2(RING_SQ);
+static_assert_pow2(RING_CQ);
+static_assert_pow2(RING_RECV_BUFFERS);
+
 
 
 static inline struct io_uring_sqe *nmp_ring_sqe(struct nmp_data *nmp)
@@ -2130,6 +2148,8 @@ static void session_destroy(struct session *ctx)
     EVP_CIPHER_CTX_free(ctx->noise_key_receive);
     EVP_CIPHER_CTX_free(ctx->noise_key_send);
 
+    // fixme
+
     log("%xu", ctx->session_id);
     mem_zero(ctx, sizeof(struct session));
     mem_free(ctx);
@@ -2279,7 +2299,10 @@ static u32 session_request(struct nmp_data *nmp, struct session *ctx)
                               &initiation->send_buf.request.initiator,
                               &initiation->send_buf.request, sizeof(struct nmp_header),
                               (u8 *) &initiation->payload[0]))
+    {
+        log("failed to write initiator");
         return 1;
+    }
 
     if (nmp_ring_send(nmp, ctx,
                       &initiation->send_buf, sizeof(struct nmp_request), &ctx->addr))
@@ -2714,8 +2737,7 @@ static i32 event_net_data(struct nmp_data *nmp, struct session *ctx,
 
         ctx->state = SESSION_STATUS_ESTAB;
         ctx->response_retries = 0;
-        if (noise_state_del(&ctx->initiation->handshake))
-            return 1;
+        noise_state_del(&ctx->initiation->handshake);
 
         mem_free(ctx->initiation);
 
@@ -2823,13 +2845,8 @@ static i32 event_net_request(struct nmp_data *nmp,
         return 0;
     }
 
-    struct noise_handshake handshake = nmp->responder_precomp;
-    struct
-    {
-        u64 timestamp;
-        u8 data[NMP_INITIATION_PAYLOAD];
-
-    } request_payload = {0};
+    struct noise_handshake handshake = nmp->noise_precomp;
+    struct nmp_init_payload request_payload = {0};
 
     struct session *ctx = hash_table_lookup(&nmp->sessions, id);
     if (ctx && ctx->state != SESSION_STATUS_CONFIRM)
@@ -3010,8 +3027,7 @@ static u32 event_net_response(struct nmp_data *nmp, const u32 session_id,
                                    NULL, k_recv, NULL) != 1)
                 return 1;
 
-            if (noise_state_del(&initiation->handshake))
-                return 1;
+            noise_state_del(&initiation->handshake);
 
             mem_zero(ctx->initiation, sizeof(struct session_initiation));
             mem_free(ctx->initiation);
@@ -3311,8 +3327,8 @@ static u32 nmp_destroy(struct nmp_data *nmp)
     if (nmp->ring.enter_ring_fd != -1)
         io_uring_queue_exit(&nmp->ring);
 
-    if (nmp->evp_md_ctx)
-        EVP_MD_CTX_free(nmp->evp_md_ctx);
+    if (nmp->evp_md)
+        EVP_MD_CTX_free(nmp->evp_md);
 
     if (nmp->evp_cipher)
         EVP_CIPHER_CTX_free(nmp->evp_cipher);
@@ -3356,9 +3372,7 @@ struct nmp_data *nmp_new(const struct nmp_conf *conf)
 {
     nmp_t *tmp = mem_alloc(sizeof(struct nmp_data));
     if (tmp == NULL)
-    {
         return NULL;
-    }
 
     // temporarily set descriptor values so that
     // destructor can figure out which ones to
@@ -3373,14 +3387,12 @@ struct nmp_data *nmp_new(const struct nmp_conf *conf)
     if (sa_family != AF_INET && sa_family != AF_INET6)
     {
         log("sa_family");
-        goto fail;
+        goto out_fail;
     }
 
     if (conf->payload &&
         (conf->payload < 492 || conf->payload > NMP_PAYLOAD_MAX))
-    {
-        goto fail;
-    }
+        goto out_fail;
 
     const u16 ka = conf->keepalive_interval ? : SESSION_TIMER_KEEPALIVE;
 
@@ -3414,24 +3426,33 @@ struct nmp_data *nmp_new(const struct nmp_conf *conf)
     tmp->transport_callbacks.data_noack = conf->data_noack_cb;
     tmp->transport_callbacks.ack = conf->ack_cb;
 
+    if (rnd_reset_pool(&tmp->rnd_lib))
+        goto out_fail;
+
+    if (rnd_reset_pool(&tmp->rnd_pub))
+        goto out_fail;
+
     tmp->evp_hmac = HMAC_CTX_new();
     if (tmp->evp_hmac == NULL)
-        goto fail;
+        goto out_fail;
 
-    tmp->evp_md_ctx = EVP_MD_CTX_new();
-    if (tmp->evp_md_ctx == NULL)
-        goto fail;
+    tmp->evp_md = EVP_MD_CTX_new();
+    if (tmp->evp_md == NULL)
+        goto out_fail;
 
     tmp->evp_cipher = EVP_CIPHER_CTX_new();
     if (tmp->evp_cipher == NULL)
-        goto fail;
+        goto out_fail;
 
     noise_keypair_initialize(&tmp->static_keys, conf->key);
-    noise_responder_init(&tmp->responder_precomp,
-                         tmp->evp_hmac,
-                         tmp->evp_md_ctx,
+    if (noise_state_init(tmp->evp_hmac,
+                         tmp->evp_md,
                          tmp->evp_cipher,
-                         &tmp->static_keys);
+                         &tmp->rnd_lib,
+                         &tmp->noise_precomp,
+                         &tmp->static_keys,
+                         tmp->static_keys.public))
+        goto out_fail;
 
 
     struct io_uring_params params = {0};
@@ -3443,42 +3464,42 @@ struct nmp_data *nmp_new(const struct nmp_conf *conf)
                    | IORING_SETUP_CQSIZE;
 
     if (io_uring_queue_init_params(RING_SQ, &tmp->ring, &params))
-        goto fail;
+        goto out_fail;
 
 
     i32 socpair[2] = {0};
     if (socketpair(AF_UNIX, SOCK_DGRAM,
                    IPPROTO_IP, socpair) == -1)
-        goto fail;
+        goto out_fail;
 
     tmp->local_rx = socpair[0];
     tmp->local_tx = socpair[1];
 
     tmp->net_udp = socket(AF_INET, SOCK_DGRAM, IPPROTO_IP);
     if (tmp->net_udp == -1)
-        goto fail;
+        goto out_fail;
 
     if (bind(tmp->net_udp, &conf->addr.sa, sizeof(union nmp_sa)) == -1)
-        goto fail;
+        goto out_fail;
 
-    if (rnd_get(tmp->sessions.key, SIPHASH_KEY))
-        goto fail;
+    if (rnd_get_bytes(&tmp->rnd_lib, tmp->sessions.key, SIPHASH_KEY))
+        goto out_fail;
 
     if (nmp_ring_setup_net(&tmp->ring, &tmp->recv_net))
-        goto fail;
+        goto out_fail;
 
     if (nmp_ring_setup_local(&tmp->ring, &tmp->recv_local))
-        goto fail;
+        goto out_fail;
 
     if (nmp_ring_recv_net(tmp))
-        goto fail;
+        goto out_fail;
 
     if (nmp_ring_recv_local(tmp))
-        goto fail;
+        goto out_fail;
 
 
     return tmp;
-    fail:
+    out_fail:
     {
         log_errno();
         nmp_destroy(tmp);
@@ -3502,11 +3523,9 @@ u32 nmp_connect(struct nmp_data *nmp, const u8 *pub, const union nmp_sa *addr,
         return 0;
     }
 
-    const u32 id = rnd_get32();
+    const u32 id = rnd_get32(&nmp->rnd_pub);
     if (id == 0)
-    {
         return 0;
-    }
 
     struct session *ctx_new = session_new();
     if (ctx_new == NULL)
@@ -3518,17 +3537,19 @@ u32 nmp_connect(struct nmp_data *nmp, const u8 *pub, const union nmp_sa *addr,
     ctx_new->context_ptr = ctx;
     ctx_new->session_id = id;
     ctx_new->addr = *addr;
-    noise_initiator_init(&ctx_new->initiation->handshake,
-                         nmp->evp_hmac,
-                         nmp->evp_md_ctx,
+    if (noise_state_init(nmp->evp_hmac,
+                         nmp->evp_md,
                          nmp->evp_cipher,
-                         &nmp->static_keys, pub);
+                         &nmp->rnd_lib,
+                         &ctx_new->initiation->handshake,
+                         &nmp->static_keys,
+                         pub))
+        return 0;
+
 
     if (payload)
-    {
         mem_copy(ctx_new->initiation->payload[0].data,
                  payload, payload_len);
-    }
 
     struct nmp_local_request request =
             {

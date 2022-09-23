@@ -29,7 +29,7 @@ typedef struct nmp_data nmp_t;
 
 // maximum size of application defined payload
 // included with requests and responses
-#define NMP_INITIATION_PAYLOAD  120
+#define NMP_INITIATION_PAYLOAD  96
 
 // verify that the address we send to matches
 // address we receive from
@@ -209,7 +209,7 @@ uint32_t nmp_run(nmp_t *, int32_t timeout);
  *  connect to some host using public key and address,
  *  this will trigger a notification to show the result.
  *  optionally include a payload as part of this request,
- *  sizes up to NMP_INITIATION_PAYLOAD (120) are accepted
+ *  sizes up to NMP_INITIATION_PAYLOAD (96) are accepted
  *
  *  returns zero on success
  */
