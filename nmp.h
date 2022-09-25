@@ -1,7 +1,7 @@
 #ifndef NMP_H
 #define NMP_H
 
-// sockaddr
+/* sockaddr */
 #include <arpa/inet.h>
 
 
@@ -9,84 +9,118 @@
 extern "C" {
 #endif
 
-typedef struct nmp_data nmp_t;
+typedef struct nmp_instance nmp_t;
 
 
-// byte length of keys (both private and public)
-#define NMP_KEYLEN              56
+/* verify that the address we send to matches address we receive from */
+#define NMP_ADDR_VERIFY         (1u << 0)
 
-// how many messages can we queue for sending (per session)
-#define NMP_QUEUE               256
 
-// how many active sessions can we have simultaneously
-#define NMP_SESSIONS            512
+enum
+{
+    /* byte length of keys (both private and public) */
+    NMP_KEYLEN = 56,
 
-// default interval for keepalive packets (in seconds)
-#define NMP_KEEPALIVE_DEFAULT   10
+    /* how many messages can we queue for sending (per session) */
+    NMP_QUEUE = 256,
 
-// maximum amount of data sent in a single message
-#define NMP_PAYLOAD_MAX         1404
+    /* how many active sessions can we have simultaneously */
+    NMP_SESSIONS = 512,
 
-// maximum size of application defined payload
-// included with requests and responses
-#define NMP_INITIATION_PAYLOAD  96
+    /* default interval for keepalive packets (in seconds) */
+    NMP_KEEPALIVE_DEFAULT = 10,
 
-// verify that the address we send to matches
-// address we receive from
-#define NMP_ADDR_VERIFY         1
+    /* maximum amount of data sent in a single message */
+    NMP_PAYLOAD_MAX = 1404,
+
+    /*
+     * maximum size of application defined payload
+     * included with requests and responses
+     */
+    NMP_INITIATION_PAYLOAD = 96,
+
+    /* maximum amount of ops nmp_op_submit() can read per call */
+    NMP_OPS_BATCH = 32,
+};
+
+
+enum nmp_op_types
+{
+    /* send data to some session, .entry_arg must point at data to be sent */
+    NMP_OP_SEND = 0,
+
+    /*
+     *  sends a 'no acknowledgement' message. these are unique (no duplicates), sent
+     *  immediately without any buffering, not reliable and the order is not preserved
+     */
+    NMP_OP_SEND_NOACK = 1,
+
+    /* drop some session by id */
+    NMP_OP_DROP = 2,
+
+    /*
+     *  connect to a remote peer using information provided in current op entry,
+     *  .entry_arg must point to a valid nmp_op_connect structure. after this
+     *  entry is consumed, id of created session is put into .session_id member
+     */
+    NMP_OP_CONNECT = 3,
+
+    /* gracefully exit */
+    NMP_OP_TERMINATE = 4,
+};
 
 
 enum nmp_status
 {
-    // useful when returning empty command
-    // from callbacks that discard result
+    /* useful when returning empty command from callbacks that discard result */
     NMP_CMD_EMPTY = 0,
 
     NMP_CMD_ACCEPT,
     NMP_CMD_RESPOND,
     NMP_CMD_DROP,
 
-
-    // session stopped receiving any data
-    // from remote peer, and is no longer active
-    // message id of latest acknowledged message
-    // is stored in nmp_status_container
+    /*
+     * session stopped receiving any data from remote peer, and is no longer active
+     * message id of latest acknowledged message is stored in nmp_cb_status
+     */
     NMP_SESSION_DISCONNECTED,
 
-    // outgoing connection started with nmp_connect()
-    // received a valid response. nmp_status_container
-    // holds a payload sent by a remote peer.
-    // return ACCEPT or DROP command to indicate action
+    /*
+     * outgoing connection request received a valid response.
+     * nmp_cb_status holds a payload sent by a remote peer.
+     * return ACCEPT or DROP command to indicate action
+     */
     NMP_SESSION_RESPONSE,
 
-    // incoming connection has been established
+    /* incoming connection has been established */
     NMP_SESSION_INCOMING,
 
-    // queue is full: outgoing message was not queued
-    // for sending. nmp_status_container holds a msg
-    // id for latest queued message
+    /*
+     * queue is full: outgoing message was not queued for sending.
+     * nmp_cb_status holds a msg id for latest queued message
+     */
     NMP_SESSION_QUEUE,
 
-    // could not start a new (outgoing) session;
-    // id of cancelled session is stored in
-    // nmp_status_container
+    /*
+     * limit on the maximum amount of sessions has been reached,
+     * could not start requested newly requested one
+     * id of cancelled session is stored in nmp_cb_status
+     */
     NMP_SESSION_MAX,
 
-    // no more data can be sent over this session,
-    // and it is dropped immediately
-    // note: this happens only when running out of
-    // nonces, so, in a very unlikely event when
-    // 2^64 - 1 packets were sent over network
+    /*
+     * no more data can be sent over this session, and it is dropped immediately
+     * note: this happens only when running out of nonces, in a very
+     * unlikely event when 2^64 - 1 packets were sent over network
+     */
     NMP_SESSION_EXPIRED,
 
-    // remote peer violates protocol,
-    // session terminated
+    /* remote peer violates protocol, session terminated */
     NMP_SESSION_ERR_PROTOCOL,
-
 };
 
 
-// convenience
+/* convenience */
 union nmp_sa
 {
     struct sockaddr sa;
@@ -95,10 +129,12 @@ union nmp_sa
 };
 
 
-// members .addr, .id, .request_payload are
-// set by the library; .context_ptr and
-// .response_payload are set by application
-struct nmp_request_container
+/*
+ *  argument for request callback:
+ *  members .addr, .id, .request_payload are set by the library,
+ *  .context_ptr and .response_payload are set by application
+ */
+struct nmp_cb_request
 {
     union nmp_sa addr;
     uint32_t id;
@@ -109,7 +145,11 @@ struct nmp_request_container
 };
 
 
-union nmp_status_container
+/*
+ *  argument for status callback:
+ *  delivers additional information about events set in status callback
+ */
+union nmp_cb_status
 {
     uint8_t payload[NMP_INITIATION_PAYLOAD];
     uint64_t msg_id;
@@ -118,68 +158,96 @@ union nmp_status_container
 };
 
 
+struct nmp_op_connect
+{
+    uint8_t pubkey[NMP_KEYLEN];
+    uint8_t payload[NMP_INITIATION_PAYLOAD];
+    uint32_t payload_len;
+    union nmp_sa addr;
+    void *context_ptr;
+};
+
+
+/*
+ *  describes a local request to instance of nmp_t
+ *  note: once nmp_ops_submit() returns, whatever entry_arg points to
+ *  is 'consumed' and is no longer needed
+ */
+struct nmp_op
+{
+    uint8_t type;
+    uint8_t flags;
+    uint16_t len;
+    uint32_t session_id;
+    uint64_t user_data;
+    void *entry_arg;
+};
+
+
 struct nmp_conf
 {
-    // address to bind to
+    /* address to bind to */
     union nmp_sa addr;
 
-    // x448 private key to use
+    /* x448 private key to use */
     uint8_t key[NMP_KEYLEN];
 
-    // set the maximum payload size to be included in a data packet;
-    // values between 492 and NMP_PAYLOAD_MAX (1404) are supported;
-    // this can be used to control MTU as typical data packet is made
-    // of 16 byte header, payload padded to be multiple of 16 and
-    // a poly1305 authentication tag
-    // set to zero to leave at a default value of NMP_PAYLOAD_MAX
+    /*
+     * set the maximum payload size to be included in a data packet; values
+     * between 492 and NMP_PAYLOAD_MAX (1404) are supported; this can be
+     * used to control MTU as typical data packet is made of 16 byte header,
+     * payload padded to be multiple of 16 and a poly1305 authentication tag
+     * set to zero to leave at a default value of NMP_PAYLOAD_MAX
+     */
     uint16_t payload;
 
-    // controls how often to send keepalive packet
-    // zero sets a default value of NMP_KEEPALIVE_DEFAULT (10)
+    /*
+     * controls how often to send keepalive packet
+     * zero sets a default value of NMP_KEEPALIVE_DEFAULT (10)
+     */
     uint16_t keepalive_interval;
 
-    // mask for options
+    /* mask for options */
     uint32_t options;
 
 
-    // this pointer is passed to request_cb so that application
-    // can have its context for processing connection requests
+    /*
+     * this pointer is passed to request_cb so that application
+     * can have its context for processing connection requests
+     */
     void *request_ctx;
 
-    // incoming request has arrived: make a decision,
-    // optionally populate response_payload member
-    // and return one of NMP_CMD_* values
+    /*
+     * incoming request has arrived: make a decision, optionally populate
+     * response_payload member and return one of NMP_CMD_* values
+     */
     enum nmp_status (*request_cb)(const uint8_t *pubkey,
-                                  struct nmp_request_container *,
+                                  struct nmp_cb_request *,
                                   void *request_ctx);
 
 
-    // new message has arrived
+    /* new message has arrived */
     void (*data_cb)(const uint8_t *data,
                     const uint32_t len,
                     void *session_ctx);
 
-    // noack message
+    /* noack message */
     void (*data_noack_cb)(const uint8_t *data,
                           const uint32_t len,
                           void *session_ctx);
 
-    // acknowledgement for message id has arrived
-    // when sending messages using nmp_send(),
-    // this id starts from zero
+    /* acknowledgement arrived, .user_data u64 given at submission time is provided */
     void (*ack_cb)(const uint64_t,
                    void *session_ctx);
 
-    // shows the amount of valid data delivered to context
-    // from recvfrom() and the amount of data fed to sendto()
+    /* shows the amount of transferred data in this session */
     void (*stats_cb)(const uint64_t rx,
                      const uint64_t tx,
                      void *session_ctx);
 
-    // deliver various session events:
-    // errors, connection status changes
+    /* deliver various session related events: errors, status changes */
     enum nmp_status (*status_cb)(const enum nmp_status,
-                                 const union nmp_status_container *,
+                                 const union nmp_cb_status *,
                                  void *session_ctx);
 };
 
@@ -198,61 +266,22 @@ void nmp_pubkey(const nmp_t *, uint8_t output[NMP_KEYLEN]);
 
 
 /*
+ *  submit up to NMP_OP_BATCH (32) requests to instance of nmp_t; returns
+ *  number of accepted ops, or index of request that failed validation
+ */
+int nmp_submit(nmp_t *, struct nmp_op *ops, int num_ops);
+
+
+/*
  *  'runs' instance of nmp_t, timeout in milliseconds
  *  set to -1 for no timeout
  *  returns zero on success
  */
-uint32_t nmp_run(nmp_t *, int32_t timeout);
-
-
-/*
- *  connect to some host using public key and address,
- *  this will trigger a notification to show the result.
- *  optionally include a payload as part of this request,
- *  sizes up to NMP_INITIATION_PAYLOAD (96) are accepted
- *
- *  returns zero on success
- */
-uint32_t nmp_connect(nmp_t *, const uint8_t *pub, const union nmp_sa *addr,
-                     const void *payload, uint32_t payload_len, void *ctx);
-
-
-/*
- *  drop some session by id; triggers a notification
- *  returns zero on success
- */
-uint32_t nmp_drop(nmp_t *, uint32_t session);
-
-
-/*
- *  send some data over network; maximum value
- *  for length argument corresponds to selected
- *  maximum during nmp_t initialization
- *  returns zero on success
- */
-uint32_t nmp_send(nmp_t *, uint32_t session,
-                  const uint8_t *data, uint16_t len);
-
-
-/*
- *  sends a 'no acknowledgement' message;
- *  these messages are unique (no dupes), sent immediately
- *  without any buffering, they are not reliable and
- *  order is not preserved
- *  returns zero on success
- */
-uint32_t nmp_send_noack(nmp_t *, uint32_t session,
-                        const uint8_t *data, uint16_t len);
-
-/*
- *  exit gracefully, terminate all existing sessions,
- *  release all related resources
- */
-uint32_t nmp_terminate(nmp_t *);
+int nmp_run(nmp_t *, int32_t timeout);
 
 
 #ifdef __cplusplus
 }
 #endif
 
-#endif // NMP_H
+#endif /* NMP_H */
