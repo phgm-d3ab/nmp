@@ -13,7 +13,7 @@ typedef struct nmp_instance nmp_t;
 
 
 /* verify that the address we send to matches address we receive from */
-#define NMP_ADDR_VERIFY         (1u << 0)
+#define NMP_F_ADDR_VERIFY   (1u << 0)
 
 
 enum
@@ -22,24 +22,27 @@ enum
     NMP_KEYLEN = 56,
 
     /* how many messages can we queue for sending (per session) */
-    NMP_QUEUE = 256,
+    NMP_QUEUELEN = 256,
 
     /* how many active sessions can we have simultaneously */
-    NMP_SESSIONS = 512,
+    NMP_SESSIONS_MAX = 512,
 
-    /* default interval for keepalive packets (in seconds) */
-    NMP_KEEPALIVE_DEFAULT = 10,
+    /*
+     * default inactivity timeout. if no data has been
+     * received during this period, session is dropped
+     */
+    NMP_KEEPALIVE_TIMEOUT = 30,
+
+    /* how many keepalive messages to send during inactivity timeout */
+    NMP_KEEPALIVE_PINGS = 3,
 
     /* maximum amount of data sent in a single message */
     NMP_PAYLOAD_MAX = 1404,
 
-    /*
-     * maximum size of application defined payload
-     * included with requests and responses
-     */
+    /* maximum size of application defined payload included with requests and responses */
     NMP_INITIATION_PAYLOAD = 96,
 
-    /* maximum amount of ops nmp_op_submit() can read per call */
+    /* maximum amount of ops nmp_submit() can read per call */
     NMP_OPS_BATCH = 32,
 };
 
@@ -81,7 +84,7 @@ enum nmp_status
 
     /*
      * session stopped receiving any data from remote peer, and is no longer active
-     * message id of latest acknowledged message is stored in nmp_cb_status
+     * user_data of latest acknowledged message is stored in nmp_cb_status
      */
     NMP_SESSION_DISCONNECTED,
 
@@ -97,13 +100,13 @@ enum nmp_status
 
     /*
      * queue is full: outgoing message was not queued for sending.
-     * nmp_cb_status holds a msg id for latest queued message
+     * nmp_cb_status holds .user_data of message failed to queue
      */
     NMP_SESSION_QUEUE,
 
     /*
      * limit on the maximum amount of sessions has been reached,
-     * could not start requested newly requested one
+     * could not start newly requested one.
      * id of cancelled session is stored in nmp_cb_status
      */
     NMP_SESSION_MAX,
@@ -130,18 +133,40 @@ union nmp_sa
 
 
 /*
- *  argument for request callback:
- *  members .addr, .id, .request_payload are set by the library,
- *  .context_ptr and .response_payload are set by application
+ *  argument for request callback, describes incoming request
+ *  and allows application to set some parameters if accepted
  */
 struct nmp_cb_request
 {
+    /* remote peer's network address */
     union nmp_sa addr;
+
+    /* id of future session, if it is accepted */
     uint32_t id;
+
+    /* remote peer's additional data attached to this request */
     uint8_t *request_payload;
 
+    /* set by application. context to pass into session callbacks */
     void *context_ptr;
+
+    /* set by application. flags to use in this session */
+    uint8_t flags;
+
+    /*
+     * set by application. set maximum for a single message
+     * note: if the value is not correct, default is applied
+     */
+    uint16_t transport_payload_max;
+
+    /* set by application. additional data to include with this response */
     uint8_t response_payload[NMP_INITIATION_PAYLOAD];
+
+    /* set by application */
+    uint8_t keepalive_pings;
+
+    /* set by application */
+    uint8_t keepalive_timeout;
 };
 
 
@@ -152,25 +177,49 @@ struct nmp_cb_request
 union nmp_cb_status
 {
     uint8_t payload[NMP_INITIATION_PAYLOAD];
-    uint64_t msg_id;
+    uint64_t user_data;
     uint32_t session_id;
     union nmp_sa addr;
 };
 
 
+/*
+ *  describes connection request
+ */
 struct nmp_op_connect
 {
+    /* remote peer's x448 public key */
     uint8_t pubkey[NMP_KEYLEN];
-    uint8_t payload[NMP_INITIATION_PAYLOAD];
-    uint32_t payload_len;
+
+    /* include application defined data to outgoing connection request */
+    uint8_t init_payload[NMP_INITIATION_PAYLOAD];
+    uint16_t init_payload_len;
+
+    /*
+     * set the maximum payload size to be included in a data packet; values between 492 and
+     * NMP_PAYLOAD_MAX (1404) are supported; this can be used to control MTU as typical data
+     * packet is made of 16 byte header, payload padded to be multiple of 16 and a poly1305
+     * authentication tag set to zero to leave at a default value of NMP_PAYLOAD_MAX
+     */
+    uint16_t payload_max;
+
+    /*  */
+    uint8_t keepalive_pings;
+
+    /*  */
+    uint8_t keepalive_timeout;
+
+    /* remote peer's network address */
     union nmp_sa addr;
+
+    /* pass this pointer to callbacks */
     void *context_ptr;
 };
 
 
 /*
  *  describes a local request to instance of nmp_t
- *  note: once nmp_ops_submit() returns, whatever entry_arg points to
+ *  note: once nmp_submit() returns, whatever entry_arg points to
  *  is 'consumed' and is no longer needed
  */
 struct nmp_op
@@ -189,23 +238,11 @@ struct nmp_conf
     /* address to bind to */
     union nmp_sa addr;
 
+    /* public key of created instance will be available here after nmp_new() returns */
+    uint8_t pubkey[NMP_KEYLEN];
+
     /* x448 private key to use */
     uint8_t key[NMP_KEYLEN];
-
-    /*
-     * set the maximum payload size to be included in a data packet; values
-     * between 492 and NMP_PAYLOAD_MAX (1404) are supported; this can be
-     * used to control MTU as typical data packet is made of 16 byte header,
-     * payload padded to be multiple of 16 and a poly1305 authentication tag
-     * set to zero to leave at a default value of NMP_PAYLOAD_MAX
-     */
-    uint16_t payload;
-
-    /*
-     * controls how often to send keepalive packet
-     * zero sets a default value of NMP_KEEPALIVE_DEFAULT (10)
-     */
-    uint16_t keepalive_interval;
 
     /* mask for options */
     uint32_t options;
@@ -221,9 +258,9 @@ struct nmp_conf
      * incoming request has arrived: make a decision, optionally populate
      * response_payload member and return one of NMP_CMD_* values
      */
-    enum nmp_status (*request_cb)(const uint8_t *pubkey,
-                                  struct nmp_cb_request *,
-                                  void *request_ctx);
+    int (*request_cb)(const uint8_t *pubkey,
+                      struct nmp_cb_request *,
+                      void *request_ctx);
 
 
     /* new message has arrived */
@@ -246,9 +283,9 @@ struct nmp_conf
                      void *session_ctx);
 
     /* deliver various session related events: errors, status changes */
-    enum nmp_status (*status_cb)(const enum nmp_status,
-                                 const union nmp_cb_status *,
-                                 void *session_ctx);
+    int (*status_cb)(const enum nmp_status,
+                     const union nmp_cb_status *,
+                     void *session_ctx);
 };
 
 
@@ -256,13 +293,7 @@ struct nmp_conf
  *  creates new instance of nmp_t and returns pointer to it
  *  NULL indicates an error
  */
-nmp_t *nmp_new(const struct nmp_conf *);
-
-
-/*
- *  copies public key of nmp_t into u8 buf
- */
-void nmp_pubkey(const nmp_t *, uint8_t output[NMP_KEYLEN]);
+nmp_t *nmp_new(struct nmp_conf *);
 
 
 /*
@@ -274,8 +305,7 @@ int nmp_submit(nmp_t *, struct nmp_op *ops, int num_ops);
 
 /*
  *  'runs' instance of nmp_t, timeout in milliseconds
- *  set to -1 for no timeout
- *  returns zero on success
+ *  set to -1 for no timeout. returns zero on success
  */
 int nmp_run(nmp_t *, int32_t timeout);
 
