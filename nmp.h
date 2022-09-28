@@ -33,8 +33,8 @@ enum
      */
     NMP_KEEPALIVE_TIMEOUT = 30,
 
-    /* how many keepalive messages to send during inactivity timeout */
-    NMP_KEEPALIVE_PINGS = 3,
+    /* how many keepalive messages to send during NMP_KEEPALIVE_TIMEOUT */
+    NMP_KEEPALIVE_MESSAGES = 3,
 
     /* maximum amount of data sent in a single message */
     NMP_PAYLOAD_MAX = 1404,
@@ -43,11 +43,11 @@ enum
     NMP_INITIATION_PAYLOAD = 96,
 
     /* maximum amount of ops nmp_submit() can read per call */
-    NMP_OPS_BATCH = 32,
+    NMP_RQ_BATCH = 32,
 };
 
 
-enum nmp_op_types
+enum nmp_rq_ops
 {
     /* send data to some session, .entry_arg must point at data to be sent */
     NMP_OP_SEND = 0,
@@ -119,7 +119,7 @@ enum nmp_status
     NMP_SESSION_EXPIRED,
 
     /* remote peer violates protocol, session terminated */
-    NMP_SESSION_ERR_PROTOCOL,
+    NMP_ERR_PROTOCOL,
 };
 
 
@@ -133,40 +133,64 @@ union nmp_sa
 
 
 /*
- *  argument for request callback, describes incoming request
- *  and allows application to set some parameters if accepted
+ *  describes connection request. this is used both
+ *  for incoming and outgoing requests
  */
-struct nmp_cb_request
+struct nmp_rq_connect
 {
+    /* */
+    uint32_t id;
+
     /* remote peer's network address */
     union nmp_sa addr;
 
-    /* id of future session, if it is accepted */
-    uint32_t id;
+    /* remote peer's x448 public key */
+    uint8_t pubkey[NMP_KEYLEN];
 
-    /* remote peer's additional data attached to this request */
-    uint8_t *request_payload;
-
-    /* set by application. context to pass into session callbacks */
-    void *context_ptr;
-
-    /* set by application. flags to use in this session */
+    /* session specific flags */
     uint8_t flags;
 
-    /*
-     * set by application. set maximum for a single message
-     * note: if the value is not correct, default is applied
-     */
-    uint16_t transport_payload_max;
-
-    /* set by application. additional data to include with this response */
-    uint8_t response_payload[NMP_INITIATION_PAYLOAD];
-
-    /* set by application */
+    /*  */
     uint8_t keepalive_pings;
 
-    /* set by application */
+    /*  */
     uint8_t keepalive_timeout;
+
+    /*  */
+    uint16_t transport_payload;
+
+    /* pointer that will be passed to callbacks */
+    void *context_ptr;
+
+    /*  */
+    uint8_t init_payload[NMP_INITIATION_PAYLOAD];
+};
+
+
+/*
+ *  describes a local request to instance of nmp_t
+ *  note: once nmp_submit() returns, whatever entry_arg points to
+ *  is 'consumed' and is no longer needed
+ */
+struct nmp_rq
+{
+    /* type of request, one of nmp_rq_ops */
+    uint8_t op;
+
+    /* message specific flags */
+    uint8_t msg_flags;
+
+    /* length of message to be sent */
+    uint16_t len;
+
+    /* id of session this request addressed to */
+    uint32_t session_id;
+
+    /* application defined data */
+    uint64_t user_data;
+
+    /*  */
+    void *entry_arg;
 };
 
 
@@ -180,56 +204,6 @@ union nmp_cb_status
     uint64_t user_data;
     uint32_t session_id;
     union nmp_sa addr;
-};
-
-
-/*
- *  describes connection request
- */
-struct nmp_op_connect
-{
-    /* remote peer's x448 public key */
-    uint8_t pubkey[NMP_KEYLEN];
-
-    /* include application defined data to outgoing connection request */
-    uint8_t init_payload[NMP_INITIATION_PAYLOAD];
-    uint16_t init_payload_len;
-
-    /*
-     * set the maximum payload size to be included in a data packet; values between 492 and
-     * NMP_PAYLOAD_MAX (1404) are supported; this can be used to control MTU as typical data
-     * packet is made of 16 byte header, payload padded to be multiple of 16 and a poly1305
-     * authentication tag set to zero to leave at a default value of NMP_PAYLOAD_MAX
-     */
-    uint16_t payload_max;
-
-    /*  */
-    uint8_t keepalive_pings;
-
-    /*  */
-    uint8_t keepalive_timeout;
-
-    /* remote peer's network address */
-    union nmp_sa addr;
-
-    /* pass this pointer to callbacks */
-    void *context_ptr;
-};
-
-
-/*
- *  describes a local request to instance of nmp_t
- *  note: once nmp_submit() returns, whatever entry_arg points to
- *  is 'consumed' and is no longer needed
- */
-struct nmp_op
-{
-    uint8_t type;
-    uint8_t flags;
-    uint16_t len;
-    uint32_t session_id;
-    uint64_t user_data;
-    void *entry_arg;
 };
 
 
@@ -258,8 +232,8 @@ struct nmp_conf
      * incoming request has arrived: make a decision, optionally populate
      * response_payload member and return one of NMP_CMD_* values
      */
-    int (*request_cb)(const uint8_t *pubkey,
-                      struct nmp_cb_request *,
+    int (*request_cb)(struct nmp_rq_connect *request,
+                      const uint8_t request_payload[NMP_INITIATION_PAYLOAD],
                       void *request_ctx);
 
 
@@ -297,10 +271,10 @@ nmp_t *nmp_new(struct nmp_conf *);
 
 
 /*
- *  submit up to NMP_OP_BATCH (32) requests to instance of nmp_t; returns
+ *  submit up to NMP_RQ_BATCH (32) requests to instance of nmp_t; returns
  *  number of accepted ops, or index of request that failed validation
  */
-int nmp_submit(nmp_t *, struct nmp_op *ops, int num_ops);
+int nmp_submit(nmp_t *, struct nmp_rq *request, int num_requests);
 
 
 /*
