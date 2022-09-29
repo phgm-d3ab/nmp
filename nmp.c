@@ -1703,6 +1703,26 @@ enum
 };
 
 
+#define kts(sec_, ms_) (struct __kernel_timespec) {(sec_), (1000000lu * (ms_)) }
+
+const struct __kernel_timespec retry_table[] =
+        {
+                kts(0, 200),
+                kts(0, 200),
+                kts(0, 300),
+                kts(0, 300),
+                kts(0, 400),
+                kts(0, 400),
+                kts(0, 500),
+                kts(0, 500),
+                kts(1, 0),
+                kts(1, 0),
+                kts(1, 0),
+                kts(1, 0),
+                kts(1, 0),
+        };
+
+
 enum retries
 {
     /*
@@ -1713,7 +1733,7 @@ enum retries
     SESSION_RETRY_RESPONSE = 10,
 
     /* how many times to retry sending data */
-    SESSION_RETRY_DATA = 10,
+    SESSION_RETRY_DATA = (sizeof(retry_table) / sizeof(struct __kernel_timespec)),
 
     /* how often (in seconds) to retry sending data */
     SESSION_RETRY_INTERVAL = 1,
@@ -2124,15 +2144,17 @@ static u32 nmp_ring_timer_set(struct nmp_instance *nmp,
 
 
 static u32 nmp_ring_timer_update(struct nmp_instance *nmp,
-                                 struct nmp_session *ctx, const u32 value)
+                                 struct nmp_session *ctx,
+                                 const struct __kernel_timespec kts)
 {
-    log("updating timer %xu to %u", ctx->session_id, value);
+    log("updating timer %xu [%lld:%lld]",
+        ctx->session_id, kts.tv_sec, kts.tv_nsec);
 
     struct io_uring_sqe *sqe = nmp_ring_sqe(nmp);
     if (sqe == NULL)
         return 1;
 
-    ctx->kts.tv_sec = value;
+    ctx->kts = kts;
     io_uring_prep_timeout_update(sqe, &ctx->kts, (u64) ctx, 0);
     io_uring_sqe_set_flags(sqe, IOSQE_CQE_SKIP_SUCCESS);
 
@@ -2141,15 +2163,17 @@ static u32 nmp_ring_timer_update(struct nmp_instance *nmp,
 
 
 static u32 nmp_ring_timer_set(struct nmp_instance *nmp,
-                              struct nmp_session *ctx, const u32 value)
+                              struct nmp_session *ctx,
+                              const struct __kernel_timespec kts)
 {
-    log("setting %u for %xu", value, ctx->session_id);
+    log("setting timer for %xu [%lld:%lld]",
+        ctx->session_id, kts.tv_sec, kts.tv_nsec);
 
     struct io_uring_sqe *sqe = nmp_ring_sqe(nmp);
     if (sqe == NULL)
         return 1;
 
-    ctx->kts.tv_sec = value;
+    ctx->kts = kts;
     io_uring_prep_timeout(sqe, &ctx->kts, 0, 0);
     io_uring_sqe_set_flags(sqe, IOSQE_CQE_SKIP_SUCCESS);
     io_uring_sqe_set_data(sqe, ctx);
@@ -2423,7 +2447,7 @@ static u32 session_request(struct nmp_instance *nmp, struct nmp_session *ctx)
 
     ctx->state = SESSION_STATUS_RESPONSE;
     ctx->stat_tx += sizeof(struct nmp_request);
-    return nmp_ring_timer_set(nmp, ctx, SESSION_RETRY_INTERVAL);
+    return nmp_ring_timer_set(nmp, ctx, kts(SESSION_RETRY_INTERVAL, 0));
 }
 
 
@@ -2452,7 +2476,7 @@ static u32 session_response(struct nmp_instance *nmp,
     ctx->state = SESSION_STATUS_CONFIRM;
     ctx->stat_tx += sizeof(struct nmp_response);
     ctx->response_retries = 0;
-    return nmp_ring_timer_set(nmp, ctx, ctx->timer_keepalive);
+    return nmp_ring_timer_set(nmp, ctx, kts(ctx->timer_keepalive, 0));
 }
 
 
@@ -2494,7 +2518,9 @@ static u32 session_data(struct nmp_instance *nmp, struct nmp_session *ctx)
                  */
                 if (ctx->state == SESSION_STATUS_ESTAB)
                 {
-                    if (nmp_ring_timer_update(nmp, ctx, SESSION_RETRY_INTERVAL))
+                    log("idle send retries %u", ctx->response_retries);
+
+                    if (nmp_ring_timer_update(nmp, ctx, retry_table[ctx->timer_retries]))
                         return 1;
 
                     ctx->state = SESSION_STATUS_ACKWAIT;
@@ -2789,6 +2815,7 @@ static u32 event_timer(struct nmp_instance *nmp,
         case SESSION_STATUS_WINDOW:
         case SESSION_STATUS_ACKWAIT:
         {
+            ctx->kts = retry_table[ctx->timer_retries];
             if (session_data_retry(nmp, ctx))
                 return 1;
 
@@ -2838,7 +2865,7 @@ static u32 event_timer(struct nmp_instance *nmp,
         nmp->stats_cb(ctx->stat_rx, ctx->stat_tx, ctx->context_ptr);
 
     /* reset to a previous value */
-    return nmp_ring_timer_set(nmp, ctx, ctx->kts.tv_sec);
+    return nmp_ring_timer_set(nmp, ctx, ctx->kts);
 }
 
 
@@ -2866,7 +2893,7 @@ static i32 net_data(struct nmp_instance *nmp, struct nmp_session *ctx,
             nmp->status_cb(NMP_SESSION_INCOMING, NULL, ctx->context_ptr);
 
         /* there could be a custom interval set, update needed */
-        if (nmp_ring_timer_update(nmp, ctx, ctx->timer_keepalive))
+        if (nmp_ring_timer_update(nmp, ctx, kts(ctx->timer_keepalive, 0)))
             return -1;
     }
 
@@ -3207,7 +3234,7 @@ static u32 net_response(struct nmp_instance *nmp,
     if (session_keepalive(nmp, ctx))
         return 1;
 
-    return nmp_ring_timer_update(nmp, ctx, ctx->timer_keepalive);
+    return nmp_ring_timer_update(nmp, ctx, kts(ctx->timer_keepalive, 0));
 }
 
 
@@ -3718,7 +3745,7 @@ static u32 run_cqe_err(struct nmp_instance *nmp, struct io_uring_cqe *cqe)
 
         case ENOENT:
             return nmp_ring_timer_set(nmp, ptr,
-                                      ((struct nmp_session *) ptr)->kts.tv_sec);
+                                      ((struct nmp_session *) ptr)->kts);
 
         case ENOBUFS:
         {
@@ -3787,7 +3814,7 @@ static u32 run_events_deliver(struct nmp_instance *nmp,
             {
                 /* everything has been acked */
                 ctx->state = SESSION_STATUS_ESTAB;
-                if (nmp_ring_timer_update(nmp, ctx, ctx->timer_keepalive))
+                if (nmp_ring_timer_update(nmp, ctx, kts(ctx->timer_keepalive, 0)))
                     return 1;
 
                 break;
