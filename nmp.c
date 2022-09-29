@@ -486,6 +486,10 @@ static i32 ht_wipe(struct hash_table *ht, u32 (*destructor)(void *))
 #define MSG_NOACK           ((u16)(1 << 15))
 #define MSG_RESERVED        ((u16)((1 << 14) | (1 << 13) | (1 << 12)))
 
+/* flags for entries */
+#define MSG_F_NOALLOC       (1u << 0) /* @nmp.h:NMP_F_NOALLOC */
+
+
 enum
 {
     MSG_MASK_BITS = 64,
@@ -525,9 +529,11 @@ struct msg_ack
 };
 
 
-struct msg_tx
+struct msg_tx_entry
 {
-    enum msg_status status;
+    u8 status;
+    u8 flags;
+    u8 pad[2];
     u16 seq;
     u16 len;
     u64 user_data;
@@ -535,7 +541,7 @@ struct msg_tx
 };
 
 
-struct msg_rx
+struct msg_rx_entry
 {
     enum msg_status status;
     u16 seq;
@@ -564,8 +570,8 @@ struct msg_state
     u16 rx_seq;
     u16 rx_delivered;
 
-    struct msg_tx tx_queue[MSG_TXQUEUE];
-    struct msg_rx rx_buffer[MSG_RXQUEUE];
+    struct msg_tx_entry tx_queue[MSG_TXQUEUE];
+    struct msg_rx_entry rx_buffer[MSG_RXQUEUE];
 };
 
 
@@ -599,7 +605,7 @@ static inline i32 msg_payload_zeropad(u8 *payload, const i32 len)
 }
 
 
-static inline void msg_tx_include(const struct msg_tx *tx,
+static inline void msg_tx_include(const struct msg_tx_entry *tx,
                                   struct msg_header *msg)
 {
     msg->sequence = tx->seq;
@@ -610,7 +616,7 @@ static inline void msg_tx_include(const struct msg_tx *tx,
 }
 
 
-static inline void msg_rx_copy(struct msg_rx *entry,
+static inline void msg_rx_copy(struct msg_rx_entry *entry,
                                const struct msg_header *msg)
 {
     entry->status = MSG_RX_RECEIVED;
@@ -632,7 +638,7 @@ static void msg_context_wipe(struct msg_state *ctx)
 {
     for (u16 i = ctx->tx_ack;; i++)
     {
-        struct msg_tx *entry = tx_get(ctx, i);
+        struct msg_tx_entry *entry = tx_get(ctx, i);
         if (entry->status != MSG_TX_EMPTY)
             mem_free(entry->msg);
 
@@ -643,13 +649,13 @@ static void msg_context_wipe(struct msg_state *ctx)
 
 
 static u32 msg_queue(struct msg_state *ctx, const u8 *msg, const u16 len,
-                     const u64 user_data)
+                     const u8 flags, const u64 user_data)
 {
     assert(msg);
 
     /* pre-increment: check one ahead */
     const u32 index = (ctx->tx_seq + 1) & (MSG_TXQUEUE - 1);
-    struct msg_tx *entry = ctx->tx_queue + index;
+    struct msg_tx_entry *entry = ctx->tx_queue + index;
 
     if (entry->status > MSG_TX_SENT)
     {
@@ -660,6 +666,7 @@ static u32 msg_queue(struct msg_state *ctx, const u8 *msg, const u16 len,
     ctx->tx_seq += 1;
 
     entry->status = MSG_TX_QUEUED;
+    entry->flags = flags;
     entry->seq = ctx->tx_seq;
     entry->msg = (u8 *) msg;
     entry->len = len;
@@ -671,7 +678,7 @@ static u32 msg_queue(struct msg_state *ctx, const u8 *msg, const u16 len,
 
 static i32 msg_assemble(struct msg_state *ctx, u8 output[MSG_MAX_PAYLOAD])
 {
-    struct msg_tx *resend_queue[MSG_WINDOW] = {0};
+    struct msg_tx_entry *resend_queue[MSG_WINDOW] = {0};
     u32 resend_amt = 0;
     u32 bytes = 0;
 
@@ -690,7 +697,7 @@ static i32 msg_assemble(struct msg_state *ctx, u8 output[MSG_MAX_PAYLOAD])
 
     for (u16 i = seq_lo; i != seq_hi; i++)
     {
-        struct msg_tx *msg = tx_get(ctx, i);
+        struct msg_tx_entry *msg = tx_get(ctx, i);
         if (msg->status == MSG_TX_EMPTY)
             break;
 
@@ -739,7 +746,7 @@ static u32 msg_assemble_retry(const struct msg_state *ctx,
 
     for (u16 i = ctx->tx_ack + 1;; i++)
     {
-        const struct msg_tx *msg = tx_get(ctx, i);
+        const struct msg_tx_entry *msg = tx_get(ctx, i);
         if (msg->status == MSG_TX_SENT)
         {
             const u16 offset = msg->len + sizeof(struct msg_header);
@@ -836,7 +843,7 @@ static i32 msg_read(const struct msg_routines *cb, struct msg_state *ctx,
             if (msg_sequence_cmp(msg->sequence, ctx->rx_seq))
                 ctx->rx_seq = msg->sequence;
 
-            struct msg_rx *entry = rx_get(ctx, msg->sequence);
+            struct msg_rx_entry *entry = rx_get(ctx, msg->sequence);
             if (entry->status == MSG_RX_EMPTY)
             {
                 new_messages += 1;
@@ -858,7 +865,7 @@ static void msg_deliver_data(const struct msg_routines *cb,
 {
     for (u16 n = ctx->rx_delivered + 1;; n++)
     {
-        struct msg_rx *entry = rx_get(ctx, n);
+        struct msg_rx_entry *entry = rx_get(ctx, n);
         if (entry->status == MSG_RX_EMPTY)
             break;
 
@@ -896,7 +903,7 @@ static u32 msg_ack_assemble(const struct msg_state *ctx, struct msg_ack *ack)
             break;
         }
 
-        const struct msg_rx *entry = rx_get(ctx, i);
+        const struct msg_rx_entry *entry = rx_get(ctx, i);
         if (entry->status == MSG_RX_EMPTY)
         {
             log("clearing bit %u for seq %u", i, entry->seq);
@@ -951,7 +958,7 @@ static i32 msg_ack_read(struct msg_state *ctx, const struct msg_ack *ack)
         {
             if (mask & 1)
             {
-                struct msg_tx *msg = tx_get(ctx, i);
+                struct msg_tx_entry *msg = tx_get(ctx, i);
                 if (msg->status == MSG_TX_SENT)
                 {
                     msg->status = MSG_TX_ACKED;
@@ -981,7 +988,7 @@ static i32 msg_deliver_ack(const struct msg_routines *cb,
      */
     for (u16 i = ctx->tx_ack + 1;; i++)
     {
-        struct msg_tx *msg = tx_get(ctx, i);
+        struct msg_tx_entry *msg = tx_get(ctx, i);
         if (msg->status != MSG_TX_ACKED)
             break;
 
@@ -990,8 +997,10 @@ static i32 msg_deliver_ack(const struct msg_routines *cb,
         if (cb->ack)
             cb->ack(msg->user_data, ctx->context_ptr);
 
-        mem_free(msg->msg);
         msg->status = MSG_TX_EMPTY;
+
+        if ((msg->flags & MSG_F_NOALLOC) == 0)
+            mem_free(msg->msg);
 
         ctx->tx_ack = msg->seq;
         counter += 1;
@@ -2172,8 +2181,10 @@ static struct nmp_session *session_new(struct nmp_rq_connect *rq,
     mem_zero(initiation, sizeof(struct nmp_session_init));
 
     const u8 ka_timeout = rq->keepalive_timeout ? : NMP_KEEPALIVE_TIMEOUT;
-    u8 ka_interval = rq->keepalive_pings ?
-                     (ka_timeout / rq->keepalive_pings) : (ka_timeout / NMP_KEEPALIVE_MESSAGES);
+    u8 ka_interval = rq->keepalive_messages ?
+                     (ka_timeout / rq->keepalive_messages) :
+                     (ka_timeout / NMP_KEEPALIVE_MESSAGES);
+
     if (ka_interval == 0)
         ka_interval = (NMP_KEEPALIVE_TIMEOUT / NMP_KEEPALIVE_MESSAGES);
 
@@ -2310,7 +2321,7 @@ static u32 session_transport_send(struct nmp_instance *nmp, struct nmp_session *
     u8 *ciphertext = packet + sizeof(struct nmp_transport);
     u8 *mac = ciphertext + amt;
 
-    if (noise_encrypt(nmp->evp_cipher, ctx->noise_counter_send,
+    if (noise_encrypt(ctx->noise_key_send, ctx->noise_counter_send,
                       &buf->transport, sizeof(struct nmp_transport),
                       payload, amt,
                       ciphertext, mac))
@@ -2325,7 +2336,7 @@ static u32 session_transport_send(struct nmp_instance *nmp, struct nmp_session *
 }
 
 
-static i32 session_transport_receive(struct nmp_instance *nmp, struct nmp_session *ctx,
+static i32 session_transport_receive(struct nmp_session *ctx,
                                      u8 *packet, const u32 packet_len,
                                      u8 plaintext[MSG_MAX_PAYLOAD])
 {
@@ -2351,7 +2362,7 @@ static i32 session_transport_receive(struct nmp_instance *nmp, struct nmp_sessio
     }
 
 
-    if (noise_decrypt(nmp->evp_cipher, counter_remote,
+    if (noise_decrypt(ctx->noise_key_receive, counter_remote,
                       header, sizeof(struct nmp_transport),
                       ciphertext, payload_len,
                       mac, plaintext))
@@ -2560,8 +2571,13 @@ static i32 local_data(struct nmp_instance *nmp,
                       struct nmp_session *ctx,
                       struct nmp_rq *request)
 {
+    u8 msg_flags = 0;
+    if (request->msg_flags & NMP_F_NOALLOC)
+        msg_flags |= MSG_F_NOALLOC;
+
+
     if (msg_queue(&ctx->transport, request->entry_arg, request->len,
-                  request->user_data))
+                  msg_flags, request->user_data))
     {
         if (nmp->status_cb)
         {
@@ -2587,7 +2603,7 @@ static i32 local_noack(struct nmp_instance *nmp,
 {
     const u32 result = session_data_noack(nmp, ctx, request->entry_arg,
                                           request->len);
-    mem_free(request);
+    mem_free(request->entry_arg);
     return result ? -1 : 0;
 }
 
@@ -2681,7 +2697,7 @@ static i32 event_local(struct nmp_instance *nmp,
         goto out;
     }
 
-    // fixme
+
     for (u32 i = 0; i < queue_len; i++)
     {
         struct nmp_rq *request = &queue->op[i];
@@ -2958,6 +2974,13 @@ static i32 net_request(struct nmp_instance *nmp,
     struct nmp_session *ctx = ht_lookup(&nmp->sessions, id);
     if (ctx)
     {
+        if (ctx->flags & NMP_F_ADDR_VERIFY
+            && mem_cmp(&addr->sa, &ctx->addr.sa, sizeof(union nmp_sa)) != 0)
+        {
+            log("rejecting response: NMP_F_ADDR_VERIFY");
+            return 0;
+        }
+
         if (ctx->initiation && ctx->response_retries < SESSION_RETRY_RESPONSE)
         {
             /* comparing to a stored copy is a cheap way to authenticate here */
@@ -3250,8 +3273,7 @@ static struct nmp_session *net_collect(struct nmp_instance *nmp,
     }
 
     u8 payload[MSG_MAX_PAYLOAD];
-    const i32 payload_len = session_transport_receive(nmp, ctx,
-                                                      (u8 *) packet, packet_len,
+    const i32 payload_len = session_transport_receive(ctx, (u8 *) packet, packet_len,
                                                       payload);
     if (payload_len < 0)
         return NULL;
@@ -3530,6 +3552,7 @@ struct nmp_instance *nmp_new(struct nmp_conf *conf)
 
 static i32 submit_connect(struct nmp_instance *nmp, struct nmp_rq *op)
 {
+    UNUSED(nmp);
     struct nmp_rq_connect *request = op->entry_arg;
 
     request->id = rnd_get32();
@@ -3557,10 +3580,6 @@ static u32 submit_validate_send(const struct nmp_rq *send)
     if (send->session_id == 0)
         return 1;
 
-    /* session specific limits are checked when instance gets this request */
-    if (send->len == 0 || send->len + sizeof(struct msg_header) > NMP_PAYLOAD_MAX)
-        return 1;
-
     if (send->entry_arg == NULL)
         return 1;
 
@@ -3574,12 +3593,15 @@ static i32 submit_send(struct nmp_instance *nmp, struct nmp_rq *op)
     if (submit_validate_send(op))
         return 1;
 
-    u8 *buf = mem_alloc(MSG_MAX_PAYLOAD);
-    if (buf == NULL)
-        return -1;
+    if ((op->msg_flags & NMP_F_NOALLOC) == 0)
+    {
+        u8 *buf = mem_alloc(MSG_MAX_PAYLOAD);
+        if (buf == NULL)
+            return -1;
 
-    mem_copy(buf, op->entry_arg, op->len);
-    op->entry_arg = buf;
+        mem_copy(buf, op->entry_arg, op->len);
+        op->entry_arg = buf;
+    }
 
     return 0;
 }
@@ -3595,7 +3617,7 @@ static i32 submit_send_noack(struct nmp_instance *nmp, struct nmp_rq *op)
     if (buf == NULL)
         return 1;
 
-    msg_assemble_noack(buf, op->entry_arg, op->len);
+    op->len = msg_assemble_noack(buf, op->entry_arg, op->len);
     op->entry_arg = buf;
 
     return 0;
@@ -3665,7 +3687,10 @@ int nmp_submit(struct nmp_instance *nmp, struct nmp_rq *ops, const int num_ops)
                 break;
 
             case 1:
+            {
+                log("failed to validate at index %i", i);
                 return i;
+            }
 
             default:
                 return -1;

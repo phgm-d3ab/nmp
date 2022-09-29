@@ -15,6 +15,12 @@ typedef struct nmp_instance nmp_t;
 /* verify that the address we send to matches address we receive from */
 #define NMP_F_ADDR_VERIFY   (1u << 0)
 
+/*
+ * tells the library to not allocate buffer for current message. application is
+ * responsible for keeping this data intact until acknowledgement is received
+ */
+#define NMP_F_NOALLOC       (1u << 1)
+
 
 enum
 {
@@ -138,7 +144,7 @@ union nmp_sa
  */
 struct nmp_rq_connect
 {
-    /* */
+    /* handle for created session */
     uint32_t id;
 
     /* remote peer's network address */
@@ -150,19 +156,19 @@ struct nmp_rq_connect
     /* session specific flags */
     uint8_t flags;
 
-    /*  */
-    uint8_t keepalive_pings;
+    /* session specific tunable for NMP_KEEPALIVE_MESSAGES */
+    uint8_t keepalive_messages;
 
-    /*  */
+    /* session specific tunable for NMP_KEEPALIVE_TIMEOUT */
     uint8_t keepalive_timeout;
 
-    /*  */
+    /* session specific tunable for NMP_PAYLOAD_MAX */
     uint16_t transport_payload;
 
     /* pointer that will be passed to callbacks */
     void *context_ptr;
 
-    /*  */
+    /* include application defined data to request/response packets  */
     uint8_t init_payload[NMP_INITIATION_PAYLOAD];
 };
 
