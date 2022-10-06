@@ -280,7 +280,7 @@ nmp_t *nmp_new(struct nmp_conf *);
  *  submit up to NMP_RQ_BATCH (32) requests to instance of nmp_t; returns
  *  number of accepted ops, or index of request that failed validation
  */
-int nmp_submit(nmp_t *, struct nmp_rq *request, int num_requests);
+int nmp_submit(nmp_t *, struct nmp_rq *, int num_requests);
 
 
 /*

@@ -57,30 +57,30 @@ static void __log_timestamp(char *output)
 
 /* make logs a bit more readable */
 static const char *nmp_dbg_packet_types[] =
-        {
-                "request",
-                "response",
-                "data",
-                "ack",
-        };
+    {
+        "request",
+        "response",
+        "data",
+        "ack",
+    };
 
 static const char *nmp_dbg_session_status[] =
-        {
-                "SESSION_STATUS_NONE",
-                "SESSION_STATUS_RESPONSE",
-                "SESSION_STATUS_CONFIRM",
-                "SESSION_STATUS_WINDOW",
-                "SESSION_STATUS_ESTAB",
-                "SESSION_STATUS_ACKWAIT",
-        };
+    {
+        "SESSION_STATUS_NONE",
+        "SESSION_STATUS_RESPONSE",
+        "SESSION_STATUS_CONFIRM",
+        "SESSION_STATUS_WINDOW",
+        "SESSION_STATUS_ESTAB",
+        "SESSION_STATUS_ACKWAIT",
+    };
 
 static const char *nmp_dbg_msg_status[] =
-        {
-                "MSG_TX_EMPTY",
-                "MSG_TX_SENT",
-                "MSG_TX_QUEUED",
-                "MSG_TX_ACKED",
-        };
+    {
+        "MSG_TX_EMPTY",
+        "MSG_TX_SENT",
+        "MSG_TX_QUEUED",
+        "MSG_TX_ACKED",
+    };
 
 
 #   define static
@@ -249,12 +249,12 @@ static u64 siphash(const u8 *key, const u8 *data, const u32 len)
     const u64 k1 = u8_u64le((key + 8));
 
     u64 v[4] =
-            {
-                    k0 ^ 0x736f6d6570736575,
-                    k1 ^ 0x646f72616e646f6d,
-                    k0 ^ 0x6c7967656e657261,
-                    k1 ^ 0x7465646279746573,
-            };
+        {
+            k0 ^ 0x736f6d6570736575,
+            k1 ^ 0x646f72616e646f6d,
+            k0 ^ 0x6c7967656e657261,
+            k1 ^ 0x7465646279746573,
+        };
 
 
     const u32 len_aligned = len & ~7;
@@ -1043,16 +1043,16 @@ enum
 
 /* "Noise_IK_448_ChaChaPoly_BLAKE2b" padded with zeros to be NOISE_HASHLEN long */
 static const u8 noise_protocol_name[NOISE_HASHLEN] =
-        {
-                0x4e, 0x6f, 0x69, 0x73, 0x65, 0x5f, 0x49, 0x4b,
-                0x5f, 0x34, 0x34, 0x38, 0x5f, 0x43, 0x68, 0x61,
-                0x43, 0x68, 0x61, 0x50, 0x6f, 0x6c, 0x79, 0x5f,
-                0x42, 0x4c, 0x41, 0x4b, 0x45, 0x32, 0x62, 0x00,
-                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        };
+    {
+        0x4e, 0x6f, 0x69, 0x73, 0x65, 0x5f, 0x49, 0x4b,
+        0x5f, 0x34, 0x34, 0x38, 0x5f, 0x43, 0x68, 0x61,
+        0x43, 0x68, 0x61, 0x50, 0x6f, 0x6c, 0x79, 0x5f,
+        0x42, 0x4c, 0x41, 0x4b, 0x45, 0x32, 0x62, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    };
 
 
 struct noise_initiator
@@ -1206,9 +1206,7 @@ static inline u32 noise_keypair_initialize(struct noise_keypair *pair,
 {
     if (private)
     {
-        if (pair->evp_priv)
-            return 1;
-
+        assert(pair->evp_priv == NULL);
         pair->evp_priv = EVP_PKEY_new_raw_private_key(EVP_PKEY_X448, NULL,
                                                       private, NOISE_DHLEN);
         if (pair->evp_priv == NULL)
@@ -1454,18 +1452,12 @@ static u32 noise_split(const struct noise_handshake *state,
 }
 
 
-static u32 noise_state_init(HMAC_CTX *evp_hmac,
-                            EVP_MD_CTX *evp_md,
-                            EVP_CIPHER_CTX *evp_cipher,
-                            struct rnd_pool *rnd,
+static u32 noise_state_init(struct noise_handshake *ref,
                             struct noise_handshake *state,
                             struct noise_keypair *s,
                             const u8 *rs)
 {
-    state->evp_hmac = evp_hmac;
-    state->evp_md = evp_md;
-    state->evp_cipher = evp_cipher;
-    state->rnd = rnd;
+    *state = *ref;
     state->s = s;
 
     mem_copy(state->symmetric_h, noise_protocol_name, NOISE_HASHLEN);
@@ -1707,26 +1699,26 @@ enum
 #define kts(sec_, ms_) (struct __kernel_timespec) {(sec_), (1000000lu * (ms_)) }
 
 static const struct __kernel_timespec rto_table[] =
-        {
-                kts(0, 200),
-                kts(0, 200),
-                kts(0, 300),
-                kts(0, 300),
-                kts(0, 400),
-                kts(0, 400),
-                kts(0, 500),
-                kts(0, 500),
-                kts(1, 0),
-                kts(1, 0),
-                kts(1, 0),
-                kts(1, 0),
-                kts(1, 0),
-                kts(1, 0),
-                kts(1, 0),
-                kts(1, 0),
-                kts(1, 0),
-                kts(1, 0),
-        };
+    {
+        kts(0, 200),
+        kts(0, 200),
+        kts(0, 300),
+        kts(0, 300),
+        kts(0, 400),
+        kts(0, 400),
+        kts(0, 500),
+        kts(0, 500),
+        kts(1, 0),
+        kts(1, 0),
+        kts(1, 0),
+        kts(1, 0),
+        kts(1, 0),
+        kts(1, 0),
+        kts(1, 0),
+        kts(1, 0),
+        kts(1, 0),
+        kts(1, 0),
+    };
 
 
 enum retries
@@ -1794,7 +1786,7 @@ enum pbuf_groups
 enum ring_params
 {
     RING_BATCH = 32,
-    RING_RECV_BUFFERS = 512,
+    RING_RECV_BUFS = 512,
     RING_SQ = (MSG_WINDOW * RING_BATCH),
     RING_CQ = (RING_SQ * 4),
 };
@@ -1944,13 +1936,14 @@ static_assert(sizeof(struct nmp_init_payload) == NOISE_HANDSHAKE_PAYLOAD, "initi
 static_assert_pow2(RING_BATCH);
 static_assert_pow2(RING_SQ);
 static_assert_pow2(RING_CQ);
-static_assert_pow2(RING_RECV_BUFFERS);
+static_assert_pow2(RING_RECV_BUFS);
 
 
-#define header_initialize(type_, id_) (struct nmp_header) { \
-                        .type = (type_),                    \
-                        .pad = {0,0,0},                     \
-                        .session_id = (id_)}
+#define header_init(type_, id_) (struct nmp_header) { \
+                        .type = (type_),              \
+                        .pad = {0,0,0},               \
+                        .session_id = (id_)}          \
+
 
 
 static inline struct io_uring_sqe *nmp_ring_sqe(struct nmp_instance *nmp)
@@ -2035,90 +2028,8 @@ static inline void nmp_ring_reuse_buf(struct io_uring_buf_ring *ring, void *addr
                                       const u32 buflen, const u32 bid)
 {
     io_uring_buf_ring_add(ring, addr, buflen, bid,
-                          io_uring_buf_ring_mask(RING_RECV_BUFFERS), 0);
+                          io_uring_buf_ring_mask(RING_RECV_BUFS), 0);
     io_uring_buf_ring_advance(ring, 1);
-}
-
-
-static u32 nmp_ring_setup_net(struct io_uring *ring,
-                              struct nmp_recv_net *buffers)
-{
-    buffers->size = (sizeof(struct io_uring_buf) + sizeof(struct nmp_pbuf_net))
-                    * RING_RECV_BUFFERS;
-    buffers->ring = mmap(NULL, buffers->size,
-                         PROT_READ | PROT_WRITE,
-                         MAP_ANONYMOUS | MAP_PRIVATE,
-                         0, 0);
-    if (buffers->ring == MAP_FAILED)
-    {
-        log_errno();
-        return 1;
-    }
-
-    io_uring_buf_ring_init(buffers->ring);
-    struct io_uring_buf_reg reg =
-            {
-                    .ring_addr = (u64) buffers->ring,
-                    .ring_entries = RING_RECV_BUFFERS,
-                    .bgid = RING_NET_GROUP,
-            };
-
-    if (io_uring_register_buf_ring(ring, &reg, 0))
-        return 1;
-
-    u8 *ptr = (u8 *) buffers->ring + (sizeof(struct io_uring_buf) * RING_RECV_BUFFERS);
-    buffers->base = (struct nmp_pbuf_net *) ptr;
-
-    for (i32 i = 0; i < RING_RECV_BUFFERS; i++)
-    {
-        io_uring_buf_ring_add(buffers->ring, &buffers->base[i],
-                              sizeof(struct nmp_pbuf_net), i,
-                              io_uring_buf_ring_mask(RING_RECV_BUFFERS), i);
-    }
-
-    io_uring_buf_ring_advance(buffers->ring, RING_RECV_BUFFERS);
-    return 0;
-}
-
-
-static u32 nmp_ring_setup_local(struct io_uring *ring,
-                                struct nmp_recv_local *buffers)
-{
-    buffers->size = (sizeof(struct io_uring_buf) + sizeof(struct nmp_pbuf_local))
-                    * RING_RECV_BUFFERS;
-    buffers->ring = mmap(NULL, buffers->size,
-                         PROT_READ | PROT_WRITE,
-                         MAP_ANONYMOUS | MAP_PRIVATE,
-                         0, 0);
-    if (buffers->ring == MAP_FAILED)
-    {
-        log_errno();
-        return 1;
-    }
-
-    io_uring_buf_ring_init(buffers->ring);
-    struct io_uring_buf_reg reg =
-            {
-                    .ring_addr = (u64) buffers->ring,
-                    .ring_entries = RING_RECV_BUFFERS,
-                    .bgid = RING_LOCAL_GROUP,
-            };
-
-    if (io_uring_register_buf_ring(ring, &reg, 0))
-        return 1;
-
-    u8 *ptr = (u8 *) buffers->ring + (sizeof(struct io_uring_buf) * RING_RECV_BUFFERS);
-    buffers->base = (struct nmp_pbuf_local *) ptr;
-
-    for (i32 i = 0; i < RING_RECV_BUFFERS; i++)
-    {
-        io_uring_buf_ring_add(buffers->ring, &buffers->base[i],
-                              sizeof(struct nmp_pbuf_local), i,
-                              io_uring_buf_ring_mask(RING_RECV_BUFFERS), i);
-    }
-
-    io_uring_buf_ring_advance(buffers->ring, RING_RECV_BUFFERS);
-    return 0;
 }
 
 
@@ -2246,9 +2157,8 @@ static struct nmp_session *session_new(struct nmp_rq_connect *rq,
         initiation->handshake = *noise;
 
     /*
-     * sequence numbers start at zero but msg_sequence_cmp()
-     * is a strict '>' so set state counters to 0xffff,
-     * exactly one before the u16 wraps around to zero
+     * sequence numbers start at zero but msg_sequence_cmp() is a strict '>' so set
+     * state counters to 0xffff, exactly one before the u16 wraps around to zero
      */
     ctx->transport.tx_seq = 0xffff;
     ctx->transport.tx_ack = 0xffff;
@@ -2348,7 +2258,7 @@ static u32 session_transport_send(struct nmp_instance *nmp, struct nmp_session *
     }
 
     struct nmp_buf_send *buf = session_buf(ctx);
-    buf->transport.type_pad_id = header_initialize(type, ctx->session_id);
+    buf->transport.type_pad_id = header_init(type, ctx->session_id);
     buf->transport.counter = ctx->noise_counter_send;
 
     const u32 packet_len = sizeof(struct nmp_transport) + amt + NOISE_AEAD_MAC;
@@ -2442,7 +2352,7 @@ static u32 session_request(struct nmp_instance *nmp, struct nmp_session *ctx)
         return 1;
 
 
-    buf->request.header = header_initialize(NMP_REQUEST, ctx->session_id);
+    buf->request.header = header_init(NMP_REQUEST, ctx->session_id);
     if (noise_initiator_write(&initiation->handshake,
                               &buf->request.initiator,
                               &buf->request, sizeof(struct nmp_header),
@@ -2473,7 +2383,7 @@ static u32 session_response(struct nmp_instance *nmp,
     struct nmp_session_init *initiation = ctx->initiation;
     struct nmp_buf_send *buf = &initiation->send_buf;
 
-    buf->response.header = header_initialize(NMP_RESPONSE, ctx->session_id);
+    buf->response.header = header_init(NMP_RESPONSE, ctx->session_id);
     if (noise_responder_write(&initiation->handshake,
                               &buf->response.responder,
                               &buf->response.header, sizeof(struct nmp_header),
@@ -2615,25 +2525,38 @@ static i32 local_data(struct nmp_instance *nmp,
                       struct nmp_session *ctx,
                       struct nmp_rq *request)
 {
+    if (ctx == NULL)
+        goto out_free;
+
     u8 msg_flags = 0;
     if (request->msg_flags & NMP_F_NOALLOC)
         msg_flags |= MSG_F_NOALLOC;
 
-
-    if (msg_queue(&ctx->transport, request->entry_arg, request->len,
+    if (msg_queue(&ctx->transport,
+                  request->entry_arg, request->len,
                   msg_flags, request->user_data))
     {
         if (nmp->status_cb)
         {
-            const union nmp_cb_status failed = {.user_data = request->user_data};
+            const union nmp_cb_status failed =
+                {.user_data = request->user_data};
+
             nmp->status_cb(NMP_SESSION_QUEUE, &failed, ctx->context_ptr);
         }
 
-        return 0;
+        goto out_free;
     }
 
     /* not free()ing this request, that is done when message is acked */
     return session_data(nmp, ctx) ? -1 : 0;
+
+    out_free:
+    {
+        if ((request->msg_flags & NMP_F_NOALLOC) == 0)
+            mem_free(request->entry_arg);
+
+        return 0;
+    }
 }
 
 
@@ -2645,6 +2568,9 @@ static i32 local_noack(struct nmp_instance *nmp,
                        struct nmp_session *ctx,
                        struct nmp_rq *request)
 {
+    if (ctx == NULL)
+        return 0;
+
     const u32 result = session_data_noack(nmp, ctx, request->entry_arg,
                                           request->len);
     mem_free(request->entry_arg);
@@ -2657,6 +2583,8 @@ static i32 local_drop(struct nmp_instance *nmp,
                       struct nmp_rq *request)
 {
     UNUSED(request);
+    if (ctx == NULL)
+        return 0;
 
     /*
      * same as session_drop(), except here we are not
@@ -2687,13 +2615,13 @@ static i32 local_connect(struct nmp_instance *nmp,
         return 0;
     }
 
-    if (noise_state_init(nmp->evp_hmac,
-                         nmp->evp_md,
-                         nmp->evp_cipher,
-                         &nmp->rnd,
+    u8 temp_rs[NOISE_DHLEN];
+    mem_copy(temp_rs, ctx->initiation->handshake.rs, NOISE_DHLEN);
+
+    if (noise_state_init(&nmp->noise_empty,
                          &ctx->initiation->handshake,
                          &nmp->static_keys,
-                         NULL))
+                         temp_rs))
         return -1;
 
     if (ht_insert(&nmp->sessions,
@@ -2726,22 +2654,11 @@ i32 local_process_rq(struct nmp_instance *nmp,
                      struct nmp_rq *request)
 {
     struct nmp_session *ctx = NULL;
-
-    /* find context for types that need it, and select appropriate action */
     const enum nmp_rq_ops type = request->op;
-    if (type < NMP_OP_CONNECT)
-    {
-        /* drop, data, noack */
-        ctx = ht_lookup(&nmp->sessions, request->session_id);
-        if (ctx == NULL)
-        {
-            log("dropping local request: ctx not found");
-            if (request->entry_arg)
-                mem_free(request->entry_arg);
 
-            return 0;
-        }
-    }
+    /* drop, data, noack */
+    if (type < NMP_OP_CONNECT)
+        ctx = ht_lookup(&nmp->sessions, request->session_id);
 
     switch (type)
     {
@@ -2826,7 +2743,9 @@ static u32 event_timer(struct nmp_instance *nmp,
 
     if (ctx->timer_retries >= ctx->timer_retry_table[ctx->state])
     {
-        const union nmp_cb_status latest = {.user_data = msg_latest_acked(&ctx->transport)};
+        const union nmp_cb_status latest =
+            {.user_data = msg_latest_acked(&ctx->transport)};
+
         session_drop(nmp, ctx, NMP_SESSION_DISCONNECTED, &latest);
         session_destroy(ctx);
         return 0;
@@ -3081,7 +3000,7 @@ static i32 net_request_respond(struct nmp_instance *nmp,
     nmp->send_iter += 1;
     struct nmp_buf_send *buf = &nmp->send_bufs[nmp->send_iter & (RING_BATCH - 1)];
 
-    buf->response.header = header_initialize(NMP_RESPONSE, rq->id);
+    buf->response.header = header_init(NMP_RESPONSE, rq->id);
     mem_copy(response_payload.data, rq->init_payload, NMP_INITIATION_PAYLOAD);
 
     if (noise_responder_write(handshake, &buf->response.responder,
@@ -3370,9 +3289,9 @@ static struct nmp_session *net_collect(struct nmp_instance *nmp,
 }
 
 
-static i32 event_network(struct nmp_instance *nmp,
-                         const struct io_uring_cqe *cqe,
-                         struct nmp_session **ctx_ptr)
+static i32 event_net(struct nmp_instance *nmp,
+                     const struct io_uring_cqe *cqe,
+                     struct nmp_session **ctx_ptr)
 {
     const u32 bid = cqe->flags >> IORING_CQE_BUFFER_SHIFT;
     struct nmp_pbuf_net *buf = nmp->recv_net.base + bid;
@@ -3386,22 +3305,23 @@ static i32 event_network(struct nmp_instance *nmp,
         return 0;
     }
 
-    struct io_uring_recvmsg_out *o = io_uring_recvmsg_validate(
-            buf, cqe->res, &nmp->recv_hdr);
-    if (o == NULL)
+    struct io_uring_recvmsg_out *msg_out = io_uring_recvmsg_validate(
+        buf, cqe->res, &nmp->recv_hdr);
+    if (msg_out == NULL)
     {
         log("failed to validate recvmsg");
-        goto out;
+        goto out_reuse;
     }
 
-    if (o->namelen > sizeof(union nmp_sa))
+    if (msg_out->namelen > sizeof(union nmp_sa))
     {
         log("rejecting namelen");
-        goto out;
+        goto out_reuse;
     }
 
-    struct nmp_header *packet = io_uring_recvmsg_payload(o, &nmp->recv_hdr);
-    const u32 packet_len = io_uring_recvmsg_payload_length(o, cqe->res, &nmp->recv_hdr);
+    struct nmp_header *packet = io_uring_recvmsg_payload(msg_out, &nmp->recv_hdr);
+    const u32 packet_len = io_uring_recvmsg_payload_length(
+        msg_out, cqe->res, &nmp->recv_hdr);
 
     log("received %u to buf %u (%s)", packet_len, bid,
         packet->type <= NMP_ACK ? nmp_dbg_packet_types[packet->type] : "unknown");
@@ -3409,11 +3329,11 @@ static i32 event_network(struct nmp_instance *nmp,
     if (packet_len >= NET_PACKET_MIN && packet_len <= NET_PACKET_MAX)
     {
         *ctx_ptr = net_collect(nmp, packet, packet_len,
-                               io_uring_recvmsg_name(o));
+                               io_uring_recvmsg_name(msg_out));
     }
 
 
-    out:
+    out_reuse:
     {
         nmp_ring_reuse_buf(nmp->recv_net.ring, buf,
                            sizeof(struct nmp_pbuf_net), bid);
@@ -3428,7 +3348,7 @@ static i32 event_network(struct nmp_instance *nmp,
 ///////////////////////////
 
 
-static u32 nmp_destroy(struct nmp_instance *nmp)
+static i32 nmp_teardown(struct nmp_instance *nmp)
 {
     errno = 0;
 
@@ -3454,11 +3374,11 @@ static u32 nmp_destroy(struct nmp_instance *nmp)
         HMAC_CTX_free(nmp->evp_hmac);
 
     const i32 descriptors[] =
-            {
-                    nmp->net_udp,
-                    nmp->local_rx,
-                    nmp->local_tx,
-            };
+        {
+            nmp->net_udp,
+            nmp->local_rx,
+            nmp->local_tx,
+        };
 
     for (u32 i = 0; i < sizeof(descriptors) / sizeof(u32); i++)
     {
@@ -3476,6 +3396,200 @@ static u32 nmp_destroy(struct nmp_instance *nmp)
     mem_free(nmp);
     assert(errno == 0);
 
+    return 0;
+}
+
+
+static u32 new_base(struct nmp_instance *nmp, struct nmp_conf *conf)
+{
+    const sa_family_t sa_family = conf->addr.sa.sa_family ? : AF_INET;
+    if (sa_family != AF_INET && sa_family != AF_INET6)
+    {
+        log("sa_family");
+        return 1;
+    }
+
+    nmp->sa_family = sa_family;
+    nmp->recv_hdr.msg_namelen = sizeof(struct sockaddr_storage);
+
+    nmp->request_ctx = conf->request_ctx;
+    nmp->request_cb = conf->request_cb;
+    nmp->status_cb = conf->status_cb;
+    nmp->stats_cb = conf->stats_cb;
+
+    nmp->transport_callbacks.data = conf->data_cb;
+    nmp->transport_callbacks.data_noack = conf->data_noack_cb;
+    nmp->transport_callbacks.ack = conf->ack_cb;
+
+    return 0;
+}
+
+
+static u32 new_ring(struct nmp_instance *nmp)
+{
+    struct io_uring_params params = {0};
+    params.cq_entries = RING_CQ;
+    params.flags = 0
+                   /* | IORING_SETUP_SINGLE_ISSUER */
+                   | IORING_SETUP_SUBMIT_ALL
+                   | IORING_SETUP_COOP_TASKRUN
+                   | IORING_SETUP_CQSIZE;
+
+    if (io_uring_queue_init_params(RING_SQ, &nmp->ring, &params))
+        return 1;
+
+    return 0;
+}
+
+
+static u32 new_ring_pbufs_net(struct io_uring *ring,
+                              struct nmp_recv_net *buffers)
+{
+    buffers->size = (sizeof(struct io_uring_buf) + sizeof(struct nmp_pbuf_net))
+                    * RING_RECV_BUFS;
+    buffers->ring = mmap(NULL, buffers->size,
+                         PROT_READ | PROT_WRITE,
+                         MAP_ANONYMOUS | MAP_PRIVATE,
+                         0, 0);
+    if (buffers->ring == MAP_FAILED)
+    {
+        log_errno();
+        return 1;
+    }
+
+    io_uring_buf_ring_init(buffers->ring);
+    struct io_uring_buf_reg reg =
+        {
+            .ring_addr = (u64) buffers->ring,
+            .ring_entries = RING_RECV_BUFS,
+            .bgid = RING_NET_GROUP,
+        };
+
+    if (io_uring_register_buf_ring(ring, &reg, 0))
+        return 1;
+
+    u8 *ptr = (u8 *) buffers->ring + (sizeof(struct io_uring_buf) * RING_RECV_BUFS);
+    buffers->base = (struct nmp_pbuf_net *) ptr;
+
+    for (i32 i = 0; i < RING_RECV_BUFS; i++)
+    {
+        io_uring_buf_ring_add(buffers->ring, &buffers->base[i],
+                              sizeof(struct nmp_pbuf_net), i,
+                              io_uring_buf_ring_mask(RING_RECV_BUFS), i);
+    }
+
+    io_uring_buf_ring_advance(buffers->ring, RING_RECV_BUFS);
+    return 0;
+}
+
+
+static u32 new_ring_pbufs_local(struct io_uring *ring,
+                                struct nmp_recv_local *buffers)
+{
+    buffers->size = (sizeof(struct io_uring_buf) + sizeof(struct nmp_pbuf_local))
+                    * RING_RECV_BUFS;
+    buffers->ring = mmap(NULL, buffers->size,
+                         PROT_READ | PROT_WRITE,
+                         MAP_ANONYMOUS | MAP_PRIVATE,
+                         0, 0);
+    if (buffers->ring == MAP_FAILED)
+    {
+        log_errno();
+        return 1;
+    }
+
+    io_uring_buf_ring_init(buffers->ring);
+    struct io_uring_buf_reg reg =
+        {
+            .ring_addr = (u64) buffers->ring,
+            .ring_entries = RING_RECV_BUFS,
+            .bgid = RING_LOCAL_GROUP,
+        };
+
+    if (io_uring_register_buf_ring(ring, &reg, 0))
+        return 1;
+
+    u8 *ptr = (u8 *) buffers->ring + (sizeof(struct io_uring_buf) * RING_RECV_BUFS);
+    buffers->base = (struct nmp_pbuf_local *) ptr;
+
+    for (i32 i = 0; i < RING_RECV_BUFS; i++)
+    {
+        io_uring_buf_ring_add(buffers->ring, &buffers->base[i],
+                              sizeof(struct nmp_pbuf_local), i,
+                              io_uring_buf_ring_mask(RING_RECV_BUFS), i);
+    }
+
+    io_uring_buf_ring_advance(buffers->ring, RING_RECV_BUFS);
+    return 0;
+}
+
+
+static u32 new_net(struct nmp_instance *nmp, struct nmp_conf *conf)
+{
+    nmp->net_udp = socket(AF_INET, SOCK_DGRAM, IPPROTO_IP);
+    if (nmp->net_udp == -1)
+        return 1;
+
+    if (bind(nmp->net_udp,
+             &conf->addr.sa, sizeof(union nmp_sa)) == -1)
+        return 1;
+
+    socklen_t nmp_sa_len = sizeof(union nmp_sa);
+    if (getsockname(nmp->net_udp,
+                    &conf->addr.sa, &nmp_sa_len) == -1)
+        return 1;
+
+    return new_ring_pbufs_net(&nmp->ring, &nmp->recv_net);
+}
+
+
+static u32 new_local(struct nmp_instance *nmp)
+{
+    i32 socpair[2] = {0};
+    if (socketpair(AF_UNIX, SOCK_DGRAM,
+                   IPPROTO_IP, socpair) == -1)
+        return 1;
+
+    nmp->local_rx = socpair[0];
+    nmp->local_tx = socpair[1];
+
+    return new_ring_pbufs_local(&nmp->ring, &nmp->recv_local);
+}
+
+
+static u32 new_crypto(struct nmp_instance *nmp, struct nmp_conf *conf)
+{
+    if (rnd_reset_pool(&nmp->rnd))
+        return 1;
+
+    nmp->evp_hmac = HMAC_CTX_new();
+    if (nmp->evp_hmac == NULL)
+        return 1;
+
+    nmp->evp_md = EVP_MD_CTX_new();
+    if (nmp->evp_md == NULL)
+        return 1;
+
+    nmp->evp_cipher = EVP_CIPHER_CTX_new();
+    if (nmp->evp_cipher == NULL)
+        return 1;
+
+    if (noise_keypair_initialize(&nmp->static_keys, conf->key))
+        return 1;
+
+
+    nmp->noise_empty.rnd = &nmp->rnd;
+    nmp->noise_empty.evp_md = nmp->evp_md;
+    nmp->noise_empty.evp_hmac = nmp->evp_hmac;
+    nmp->noise_empty.evp_cipher = nmp->evp_cipher;
+
+    if (noise_state_init(&nmp->noise_empty,
+                         &nmp->noise_precomp,
+                         &nmp->static_keys,
+                         nmp->static_keys.public))
+        return 1;
+
+    mem_copy(conf->pubkey, nmp->static_keys.public, NOISE_DHLEN);
     return 0;
 }
 
@@ -3503,92 +3617,24 @@ struct nmp_instance *nmp_new(struct nmp_conf *conf)
     tmp->local_rx = -1;
     tmp->net_udp = -1;
 
-    const sa_family_t sa_family = conf->addr.sa.sa_family ? : AF_INET;
-    if (sa_family != AF_INET && sa_family != AF_INET6)
-    {
-        log("sa_family");
-        goto out_fail;
-    }
 
-    tmp->sa_family = sa_family;
-    tmp->recv_hdr.msg_namelen = sizeof(struct sockaddr_storage);
-
-    tmp->request_ctx = conf->request_ctx;
-    tmp->request_cb = conf->request_cb;
-    tmp->status_cb = conf->status_cb;
-    tmp->stats_cb = conf->stats_cb;
-
-    tmp->transport_callbacks.data = conf->data_cb;
-    tmp->transport_callbacks.data_noack = conf->data_noack_cb;
-    tmp->transport_callbacks.ack = conf->ack_cb;
-
-    if (rnd_reset_pool(&tmp->rnd))
+    if (new_base(tmp, conf))
         goto out_fail;
 
-    tmp->evp_hmac = HMAC_CTX_new();
-    if (tmp->evp_hmac == NULL)
+    if (new_crypto(tmp, conf))
         goto out_fail;
 
-    tmp->evp_md = EVP_MD_CTX_new();
-    if (tmp->evp_md == NULL)
+    if (new_ring(tmp))
         goto out_fail;
 
-    tmp->evp_cipher = EVP_CIPHER_CTX_new();
-    if (tmp->evp_cipher == NULL)
+    if (new_local(tmp))
         goto out_fail;
 
-    if (noise_keypair_initialize(&tmp->static_keys, conf->key))
+    if (new_net(tmp, conf))
         goto out_fail;
 
-    if (noise_state_init(tmp->evp_hmac,
-                         tmp->evp_md,
-                         tmp->evp_cipher,
-                         &tmp->rnd,
-                         &tmp->noise_precomp,
-                         &tmp->static_keys,
-                         tmp->static_keys.public))
-        goto out_fail;
-
-    mem_copy(conf->pubkey, tmp->static_keys.public, NOISE_DHLEN);
-
-    struct io_uring_params params = {0};
-    params.cq_entries = RING_CQ;
-    params.flags = 0
-                   | IORING_SETUP_SINGLE_ISSUER
-                   | IORING_SETUP_SUBMIT_ALL
-                   | IORING_SETUP_COOP_TASKRUN
-                   | IORING_SETUP_CQSIZE;
-
-    if (io_uring_queue_init_params(RING_SQ, &tmp->ring, &params))
-        goto out_fail;
-
-
-    i32 socpair[2] = {0};
-    if (socketpair(AF_UNIX, SOCK_DGRAM,
-                   IPPROTO_IP, socpair) == -1)
-        goto out_fail;
-
-    tmp->local_rx = socpair[0];
-    tmp->local_tx = socpair[1];
-
-    tmp->net_udp = socket(AF_INET, SOCK_DGRAM, IPPROTO_IP);
-    if (tmp->net_udp == -1)
-        goto out_fail;
-
-    if (bind(tmp->net_udp, &conf->addr.sa, sizeof(union nmp_sa)) == -1)
-        goto out_fail;
-
-    socklen_t nmp_sa_len = sizeof(union nmp_sa);
-    if (getsockname(tmp->net_udp, &conf->addr.sa, &nmp_sa_len) == -1)
-        goto out_fail;
 
     if (rnd_get_bytes(&tmp->rnd, tmp->sessions.key, SIPHASH_KEY))
-        goto out_fail;
-
-    if (nmp_ring_setup_net(&tmp->ring, &tmp->recv_net))
-        goto out_fail;
-
-    if (nmp_ring_setup_local(&tmp->ring, &tmp->recv_local))
         goto out_fail;
 
     if (nmp_ring_recv_net(tmp))
@@ -3602,16 +3648,16 @@ struct nmp_instance *nmp_new(struct nmp_conf *conf)
     out_fail:
     {
         log_errno();
-        nmp_destroy(tmp);
+        nmp_teardown(tmp);
         return NULL;
     }
 }
 
 
-static i32 submit_connect(struct nmp_instance *nmp, struct nmp_rq *op)
+static i32 submit_connect(struct nmp_instance *nmp, struct nmp_rq *rq)
 {
     UNUSED(nmp);
-    struct nmp_rq_connect *request = op->entry_arg;
+    struct nmp_rq_connect *request = rq->entry_arg;
 
     request->id = rnd_get32();
     if (request->id == 0)
@@ -3627,8 +3673,8 @@ static i32 submit_connect(struct nmp_instance *nmp, struct nmp_rq *op)
     mem_copy(session->initiation->payload.data,
              request->init_payload, NMP_INITIATION_PAYLOAD);
 
-    op->session_id = request->id;
-    op->entry_arg = session;
+    rq->session_id = request->id;
+    rq->entry_arg = session;
     return 0;
 }
 
@@ -3645,63 +3691,76 @@ static u32 submit_validate_send(const struct nmp_rq *send)
 }
 
 
-static i32 submit_send(struct nmp_instance *nmp, struct nmp_rq *op)
+static i32 submit_send(struct nmp_instance *nmp, struct nmp_rq *rq)
 {
     UNUSED(nmp);
-    if (submit_validate_send(op))
+    if (submit_validate_send(rq))
         return 1;
 
-    if ((op->msg_flags & NMP_F_NOALLOC) == 0)
+    if ((rq->msg_flags & NMP_F_NOALLOC) == 0)
     {
         u8 *buf = mem_alloc(MSG_MAX_PAYLOAD);
         if (buf == NULL)
             return -1;
 
-        mem_copy(buf, op->entry_arg, op->len);
-        op->entry_arg = buf;
+        mem_copy(buf, rq->entry_arg, rq->len);
+        rq->entry_arg = buf;
     }
 
     return 0;
 }
 
 
-static i32 submit_send_noack(struct nmp_instance *nmp, struct nmp_rq *op)
+static i32 submit_send_noack(struct nmp_instance *nmp, struct nmp_rq *rq)
 {
     UNUSED(nmp);
-    if (submit_validate_send(op))
+    if (submit_validate_send(rq))
         return 1;
 
     struct msg_header *buf = mem_alloc(MSG_MAX_PAYLOAD);
     if (buf == NULL)
         return 1;
 
-    op->len = msg_assemble_noack(buf, op->entry_arg, op->len);
-    op->entry_arg = buf;
+    rq->len = msg_assemble_noack(buf, rq->entry_arg, rq->len);
+    rq->entry_arg = buf;
 
     return 0;
 }
 
 
-static i32 submit_drop(struct nmp_instance *nmp, struct nmp_rq *op)
+static void submit_cleanup(struct nmp_rq *rq, const i32 num_ops)
 {
-    UNUSED(nmp);
-    return (op->session_id == 0);
+    for (i32 i = 0; i < num_ops; i++)
+    {
+        if (rq->entry_arg == NULL)
+            continue;
+
+        switch (rq->op)
+        {
+            case NMP_OP_CONNECT:
+                if (rq->session_id && rq->entry_arg)
+                    session_destroy(rq->entry_arg);
+                continue;
+
+            case NMP_OP_SEND:
+                if ((rq->msg_flags & NMP_F_NOALLOC) == 0 && rq->entry_arg)
+                    mem_free(rq->entry_arg);
+                continue;
+
+            case NMP_OP_SEND_NOACK:
+                if (rq->entry_arg)
+                    mem_free(rq->entry_arg);
+
+            default:
+                continue;
+        }
+    }
 }
 
 
-static i32 submit_term(struct nmp_instance *nmp, struct nmp_rq *op)
+int nmp_submit(struct nmp_instance *nmp, struct nmp_rq *rqs, const int num_ops)
 {
-    UNUSED(nmp);
-    UNUSED(op);
-
-    /* nothing to validate */
-    return 0;
-}
-
-
-int nmp_submit(struct nmp_instance *nmp, struct nmp_rq *ops, const int num_ops)
-{
-    if (!nmp || !ops)
+    if (!nmp || !rqs)
         return 1;
 
     if (num_ops <= 0 || num_ops > NMP_RQ_BATCH)
@@ -3713,26 +3772,25 @@ int nmp_submit(struct nmp_instance *nmp, struct nmp_rq *ops, const int num_ops)
     {
         u32 err = 0;
 
-        switch ((enum nmp_rq_ops) ops[i].op)
+        switch ((enum nmp_rq_ops) rqs[i].op)
         {
             case NMP_OP_SEND:
-                err = submit_send(nmp, &ops[i]);
+                err = submit_send(nmp, &rqs[i]);
                 break;
 
             case NMP_OP_SEND_NOACK:
-                err = submit_send_noack(nmp, &ops[i]);
+                err = submit_send_noack(nmp, &rqs[i]);
                 break;
 
             case NMP_OP_DROP:
-                err = submit_drop(nmp, &ops[i]);
+                err = (rqs[i].session_id == 0);
                 break;
 
             case NMP_OP_CONNECT:
-                err = submit_connect(nmp, &ops[i]);
+                err = submit_connect(nmp, &rqs[i]);
                 break;
 
             case NMP_OP_TERMINATE:
-                err = submit_term(nmp, &ops[i]);
                 break;
 
             default:
@@ -3755,55 +3813,13 @@ int nmp_submit(struct nmp_instance *nmp, struct nmp_rq *ops, const int num_ops)
         }
     }
 
-    if (write(nmp->local_tx, ops, sizeof(struct nmp_rq) * num_ops) == -1)
+    if (write(nmp->local_tx, rqs, sizeof(struct nmp_rq) * num_ops) == -1)
     {
-        // todo
+        submit_cleanup(rqs, i);
         return -1;
     }
 
     return i;
-}
-
-
-static u32 run_cqe_err(struct nmp_instance *nmp, struct io_uring_cqe *cqe)
-{
-    void *ptr = io_uring_cqe_get_data(cqe);
-
-    switch (-cqe->res)
-    {
-        case ETIME:
-            return event_timer(nmp, ptr);
-
-        case ENOENT:
-            return nmp_ring_timer_set(nmp, ptr,
-                                      ((struct nmp_session *) ptr)->kts);
-
-        case ENOBUFS:
-        {
-            if (ptr != &nmp->net_udp && ptr != &nmp->local_rx)
-                return 1;
-
-            if (ptr == &nmp->net_udp)
-                return nmp_ring_recv_net(nmp);
-
-            if (ptr == &nmp->local_rx)
-                return nmp_ring_recv_local(nmp);
-
-            break;
-        }
-
-        case EPERM:
-        {
-            // todo
-
-            return 0;
-        }
-
-        default:
-            return 1;
-    }
-
-    return 0;
 }
 
 
@@ -3879,87 +3895,125 @@ static u32 run_events_deliver(struct nmp_instance *nmp,
 }
 
 
+static u32 run_cqe_err(struct nmp_instance *nmp, struct io_uring_cqe *cqe)
+{
+    void *ptr = io_uring_cqe_get_data(cqe);
+
+    switch (-cqe->res)
+    {
+        case ETIME:
+            return event_timer(nmp, ptr);
+
+        case ENOENT:
+            return nmp_ring_timer_set(nmp, ptr,
+                                      ((struct nmp_session *) ptr)->kts);
+
+        case ENOBUFS:
+        {
+            if (ptr == &nmp->net_udp)
+                return nmp_ring_recv_net(nmp);
+
+            if (ptr == &nmp->local_rx)
+                return nmp_ring_recv_local(nmp);
+
+            return 1;
+        }
+
+        case EPERM:
+        {
+            // todo
+
+            return 0;
+        }
+
+        default:
+            return 1;
+    }
+
+    return 0;
+}
+
+
+static i32 run_cqe_process(struct nmp_instance *nmp,
+                           struct io_uring_cqe *cqe,
+                           struct nmp_session **ctx)
+{
+    if (cqe->res < 0)
+    {
+        log("cqe status %s (%p)",
+            strerrorname_np(-cqe->res),
+            io_uring_cqe_get_data(cqe));
+
+        if (run_cqe_err(nmp, cqe))
+            return 1;
+
+        return 0;
+    }
+
+    if ((cqe->flags & IORING_CQE_F_BUFFER) == 0)
+    {
+        log("unrecognized cqe %p", io_uring_cqe_get_data(cqe));
+        return 1;
+    }
+
+    if (io_uring_cqe_get_data(cqe) == &nmp->net_udp)
+        return event_net(nmp, cqe, ctx);
+
+    if (io_uring_cqe_get_data(cqe) == &nmp->local_rx)
+        return event_local(nmp, cqe, ctx);
+
+    log("unrecognized buffer group");
+    return 1;
+}
+
+
+i32 run_wait_cqes(struct nmp_instance *nmp, struct io_uring_cqe **cqes)
+{
+    const i32 submitted = io_uring_submit_and_wait(&nmp->ring, 1);
+    if (submitted < 0)
+    {
+        log("wait interrupted: %s", strerrorname_np(-submitted));
+
+        /* -errno */
+        switch (-submitted)
+        {
+            case EINTR:
+                return 0;
+
+            default:
+                return -1;
+        }
+    }
+
+    return (i32) io_uring_peek_batch_cqe(&nmp->ring, cqes, RING_BATCH);
+}
+
+
 i32 nmp_run(struct nmp_instance *nmp, const i32 timeout)
 {
     UNUSED(timeout); // fixme
 
     for (;;)
     {
-        const i32 submitted = io_uring_submit_and_wait(&nmp->ring, 1);
-        if (submitted < 0)
-        {
-            log("wait interrupted: %s", strerrorname_np(-submitted));
-
-            /* -errno */
-            switch (-submitted)
-            {
-                case EINTR:
-                    continue;
-
-                default:
-                    return 1;
-            }
-        }
-
         struct io_uring_cqe *cqes[RING_BATCH] = {0};
-        u32 batch = io_uring_peek_batch_cqe(&nmp->ring, cqes, RING_BATCH);
-        if (batch == 0)
-        {
-            log("empty batch");
-            continue;
-        }
+
+        i32 batch = run_wait_cqes(nmp, cqes);
+        if (batch < 0)
+            return -1;
 
         struct nmp_session *events_queue[RING_BATCH] = {0};
         u32 queued = 0;
 
-
-        for (u32 i = 0; i < batch; i++)
+        for (i32 i = 0; i < batch; i++)
         {
-            if (cqes[i]->res < 0)
-            {
-                log("cqe status %s (%p)",
-                    strerrorname_np(-cqes[i]->res),
-                    io_uring_cqe_get_data(cqes[i]));
-
-                if (run_cqe_err(nmp, cqes[i]))
-                    return 1;
-
-                continue;
-            }
-
-            if ((cqes[i]->flags & IORING_CQE_F_BUFFER) == 0)
-            {
-                log("unrecognized cqe %p", io_uring_cqe_get_data(cqes[i]));
-                return 1;
-            }
-
-            i32 result = 0;
             struct nmp_session *ctx = NULL;
 
-            for (;;)
-            {
-                if (io_uring_cqe_get_data(cqes[i]) == &nmp->net_udp)
-                {
-                    result = event_network(nmp, cqes[i], &ctx);
-                    break;
-                }
-
-                if (io_uring_cqe_get_data(cqes[i]) == &nmp->local_rx)
-                {
-                    result = event_local(nmp, cqes[i], &ctx);
-                    break;
-                }
-
-                log("unrecognized buffer group");
-                return 1;
-            }
-
-            switch (result)
+            switch (run_cqe_process(nmp, cqes[i], &ctx))
             {
                 case 0:
                     break;
                 case 1:
-                    return (i32) nmp_destroy(nmp);
+                    return nmp_teardown(nmp);
                 default:
                     return 1;
             }
