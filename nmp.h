@@ -19,7 +19,13 @@ typedef struct nmp_instance nmp_t;
  * tells the library to not allocate buffer for current message. application is
  * responsible for keeping this data intact until acknowledgement is received
  */
-#define NMP_F_NOALLOC       (1u << 1)
+#define NMP_F_MSG_NOALLOC   (1u << 2)
+
+/*
+ * do not require acknowledgement for this message. this also means message is sent immediately
+ * without any buffering, order is not preserved
+ */
+#define NMP_F_MSG_NOACK     (1u << 3)
 
 
 enum
@@ -58,24 +64,18 @@ enum nmp_rq_ops
     /* send data to some session, .entry_arg must point at data to be sent */
     NMP_OP_SEND = 0,
 
-    /*
-     *  sends a 'no acknowledgement' message. these are unique (no duplicates), sent
-     *  immediately without any buffering, not reliable and the order is not preserved
-     */
-    NMP_OP_SEND_NOACK = 1,
-
     /* drop some session by id */
-    NMP_OP_DROP = 2,
+    NMP_OP_DROP = 1,
 
     /*
      *  connect to a remote peer using information provided in current op entry,
      *  .entry_arg must point to a valid nmp_op_connect structure. after this
      *  entry is consumed, id of created session is put into .session_id member
      */
-    NMP_OP_CONNECT = 3,
+    NMP_OP_CONNECT = 2,
 
     /* gracefully exit */
-    NMP_OP_TERMINATE = 4,
+    NMP_OP_TERMINATE = 3,
 };
 
 

@@ -45,7 +45,7 @@ static void __log_timestamp(char *output)
 }
 
 #   define __log(fmt__, ...) \
-        {   char timestr__[32] = {0};                                           \
+            do { char timestr__[32] = {0};                                      \
             __log_timestamp(timestr__);                                         \
             dprintf(STDERR_FILENO, "[%s][nmp][%s():%u] " fmt__ "\n", timestr__, \
                 __FUNCTION__, __LINE__, ##__VA_ARGS__); } while(0)              \
@@ -487,7 +487,7 @@ static i32 ht_wipe(struct hash_table *ht, u32 (*destructor)(void *))
 #define MSG_RESERVED        ((u16)((1 << 14) | (1 << 13) | (1 << 12)))
 
 /* flags for entries */
-#define MSG_F_NOALLOC       (1u << 0) /* @nmp.h:NMP_F_NOALLOC */
+#define MSG_F_NOALLOC       (1u << 0) /* @nmp.h:NMP_F_MSG_NOALLOC */
 
 
 enum
@@ -532,7 +532,7 @@ struct msg_ack
 struct msg_tx_entry
 {
     u8 status;
-    u8 flags;
+    u8 msg_flags;
     u8 pad[2];
     u16 seq;
     u16 len;
@@ -641,7 +641,7 @@ static void msg_context_wipe(struct msg_state *ctx)
         struct msg_tx_entry *entry = tx_get(ctx, i);
         if (entry->status != MSG_TX_EMPTY)
         {
-            if ((entry->flags & MSG_F_NOALLOC) == 0)
+            if ((entry->msg_flags & MSG_F_NOALLOC) == 0)
                 mem_free(entry->msg);
         }
 
@@ -669,7 +669,7 @@ static u32 msg_queue(struct msg_state *ctx, const u8 *msg, const u16 len,
     ctx->tx_seq += 1;
 
     entry->status = MSG_TX_QUEUED;
-    entry->flags = flags;
+    entry->msg_flags = flags;
     entry->seq = ctx->tx_seq;
     entry->msg = (u8 *) msg;
     entry->len = len;
@@ -1000,7 +1000,7 @@ static i32 msg_deliver_ack(const struct msg_routines *cb,
 
         msg->status = MSG_TX_EMPTY;
 
-        if ((msg->flags & MSG_F_NOALLOC) == 0)
+        if ((msg->msg_flags & MSG_F_NOALLOC) == 0)
             mem_free(msg->msg);
 
         ctx->tx_ack = msg->seq;
@@ -2411,10 +2411,10 @@ static u32 session_data(struct nmp_instance *nmp, struct nmp_session *ctx)
         return 0;
     }
 
+    u8 payload[MSG_MAX_PAYLOAD];
+
     for (;;)
     {
-        u8 payload[MSG_MAX_PAYLOAD];
-
         const i32 amt = msg_assemble(&ctx->transport, payload);
         switch (amt)
         {
@@ -2521,6 +2521,21 @@ static u32 session_keepalive(struct nmp_instance *nmp, struct nmp_session *ctx)
 ///////////////////////////////
 
 
+/*
+ *  remember: message is preformed in nmp_send_noack()
+ *  so we have a payload that is ready for sending
+ */
+static i32 local_data_noack(struct nmp_instance *nmp,
+                            struct nmp_session *ctx,
+                            struct nmp_rq *request)
+{
+    const u32 res = session_data_noack(nmp, ctx, request->entry_arg,
+                                       request->len);
+    mem_free(request->entry_arg);
+    return (i32) res;
+}
+
+
 static i32 local_data(struct nmp_instance *nmp,
                       struct nmp_session *ctx,
                       struct nmp_rq *request)
@@ -2528,8 +2543,14 @@ static i32 local_data(struct nmp_instance *nmp,
     if (ctx == NULL)
         goto out_free;
 
+    if (request->len > ctx->transport.payload_max)
+        goto out_free;
+
+    if (request->msg_flags & NMP_F_MSG_NOACK)
+        return local_data_noack(nmp, ctx, request);
+
     u8 msg_flags = 0;
-    if (request->msg_flags & NMP_F_NOALLOC)
+    if (request->msg_flags & NMP_F_MSG_NOALLOC)
         msg_flags |= MSG_F_NOALLOC;
 
     if (msg_queue(&ctx->transport,
@@ -2552,29 +2573,11 @@ static i32 local_data(struct nmp_instance *nmp,
 
     out_free:
     {
-        if ((request->msg_flags & NMP_F_NOALLOC) == 0)
+        if ((request->msg_flags & NMP_F_MSG_NOALLOC) == 0)
             mem_free(request->entry_arg);
 
         return 0;
     }
-}
-
-
-/*
- *  remember: message is preformed in nmp_send_noack()
- *  so we have a payload that is ready for sending
- */
-static i32 local_noack(struct nmp_instance *nmp,
-                       struct nmp_session *ctx,
-                       struct nmp_rq *request)
-{
-    if (ctx == NULL)
-        return 0;
-
-    const u32 result = session_data_noack(nmp, ctx, request->entry_arg,
-                                          request->len);
-    mem_free(request->entry_arg);
-    return result ? -1 : 0;
 }
 
 
@@ -2656,7 +2659,7 @@ i32 local_process_rq(struct nmp_instance *nmp,
     struct nmp_session *ctx = NULL;
     const enum nmp_rq_ops type = request->op;
 
-    /* drop, data, noack */
+    /* drop, data */
     if (type < NMP_OP_CONNECT)
         ctx = ht_lookup(&nmp->sessions, request->session_id);
 
@@ -2664,8 +2667,6 @@ i32 local_process_rq(struct nmp_instance *nmp,
     {
         case NMP_OP_SEND:
             return local_data(nmp, ctx, request);
-        case NMP_OP_SEND_NOACK:
-            return local_noack(nmp, ctx, request);
         case NMP_OP_DROP:
             return local_drop(nmp, ctx, request);
         case NMP_OP_CONNECT:
@@ -3657,23 +3658,26 @@ struct nmp_instance *nmp_new(struct nmp_conf *conf)
 static i32 submit_connect(struct nmp_instance *nmp, struct nmp_rq *rq)
 {
     UNUSED(nmp);
-    struct nmp_rq_connect *request = rq->entry_arg;
+    struct nmp_rq_connect *connect = rq->entry_arg;
 
-    request->id = rnd_get32();
-    if (request->id == 0)
+    if (connect->addr.sa.sa_family != nmp->sa_family)
         return -1;
 
-    struct nmp_session *session = session_new(request, NULL);
+    connect->id = rnd_get32();
+    if (connect->id == 0)
+        return -1;
+
+    struct nmp_session *session = session_new(connect, NULL);
     if (session == NULL)
         return -1;
 
     mem_copy(session->initiation->handshake.rs,
-             request->pubkey, NMP_KEYLEN);
+             connect->pubkey, NMP_KEYLEN);
 
     mem_copy(session->initiation->payload.data,
-             request->init_payload, NMP_INITIATION_PAYLOAD);
+             connect->init_payload, NMP_INITIATION_PAYLOAD);
 
-    rq->session_id = request->id;
+    rq->session_id = connect->id;
     rq->entry_arg = session;
     return 0;
 }
@@ -3684,28 +3688,11 @@ static u32 submit_validate_send(const struct nmp_rq *send)
     if (send->session_id == 0)
         return 1;
 
+    if (send->len == 0)
+        return 1;
+
     if (send->entry_arg == NULL)
         return 1;
-
-    return 0;
-}
-
-
-static i32 submit_send(struct nmp_instance *nmp, struct nmp_rq *rq)
-{
-    UNUSED(nmp);
-    if (submit_validate_send(rq))
-        return 1;
-
-    if ((rq->msg_flags & NMP_F_NOALLOC) == 0)
-    {
-        u8 *buf = mem_alloc(MSG_MAX_PAYLOAD);
-        if (buf == NULL)
-            return -1;
-
-        mem_copy(buf, rq->entry_arg, rq->len);
-        rq->entry_arg = buf;
-    }
 
     return 0;
 }
@@ -3728,6 +3715,29 @@ static i32 submit_send_noack(struct nmp_instance *nmp, struct nmp_rq *rq)
 }
 
 
+static i32 submit_send(struct nmp_instance *nmp, struct nmp_rq *rq)
+{
+    UNUSED(nmp);
+    if (submit_validate_send(rq))
+        return 1;
+
+    if (rq->msg_flags & NMP_F_MSG_NOACK)
+        return submit_send_noack(nmp, rq);
+
+    if ((rq->msg_flags & NMP_F_MSG_NOALLOC) == 0)
+    {
+        u8 *buf = mem_alloc(MSG_MAX_PAYLOAD);
+        if (buf == NULL)
+            return -1;
+
+        mem_copy(buf, rq->entry_arg, rq->len);
+        rq->entry_arg = buf;
+    }
+
+    return 0;
+}
+
+
 static void submit_cleanup(struct nmp_rq *rq, const i32 num_ops)
 {
     for (i32 i = 0; i < num_ops; i++)
@@ -3743,13 +3753,9 @@ static void submit_cleanup(struct nmp_rq *rq, const i32 num_ops)
                 continue;
 
             case NMP_OP_SEND:
-                if ((rq->msg_flags & NMP_F_NOALLOC) == 0 && rq->entry_arg)
+                if ((rq->msg_flags & NMP_F_MSG_NOALLOC) == 0 && rq->entry_arg)
                     mem_free(rq->entry_arg);
                 continue;
-
-            case NMP_OP_SEND_NOACK:
-                if (rq->entry_arg)
-                    mem_free(rq->entry_arg);
 
             default:
                 continue;
@@ -3776,10 +3782,6 @@ int nmp_submit(struct nmp_instance *nmp, struct nmp_rq *rqs, const int num_ops)
         {
             case NMP_OP_SEND:
                 err = submit_send(nmp, &rqs[i]);
-                break;
-
-            case NMP_OP_SEND_NOACK:
-                err = submit_send_noack(nmp, &rqs[i]);
                 break;
 
             case NMP_OP_DROP:
@@ -3992,17 +3994,15 @@ i32 run_wait_cqes(struct nmp_instance *nmp, struct io_uring_cqe **cqes)
 i32 nmp_run(struct nmp_instance *nmp, const i32 timeout)
 {
     UNUSED(timeout); // fixme
+    struct io_uring_cqe *cqes[RING_BATCH] = {0};
+    struct nmp_session *events_queue[RING_BATCH] = {0};
 
     for (;;)
     {
-        struct io_uring_cqe *cqes[RING_BATCH] = {0};
-
+        u32 queued = 0;
         i32 batch = run_wait_cqes(nmp, cqes);
         if (batch < 0)
             return -1;
-
-        struct nmp_session *events_queue[RING_BATCH] = {0};
-        u32 queued = 0;
 
         for (i32 i = 0; i < batch; i++)
         {
