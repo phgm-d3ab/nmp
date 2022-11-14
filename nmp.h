@@ -285,9 +285,9 @@ int nmp_submit(nmp_t *, struct nmp_rq *, int num_requests);
 
 /*
  *  'runs' instance of nmp_t, timeout in milliseconds
- *  set to -1 for no timeout. returns zero on success
+ *  set to 0 for no timeout. returns zero on success
  */
-int nmp_run(nmp_t *, int32_t timeout);
+int nmp_run(nmp_t *, uint32_t timeout);
 
 
 #ifdef __cplusplus

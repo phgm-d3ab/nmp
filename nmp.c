@@ -16,7 +16,6 @@
 
 #include <liburing.h>
 #include <openssl/evp.h>
-#include <openssl/hmac.h>
 
 
 typedef uint8_t u8;
@@ -1084,7 +1083,7 @@ struct noise_keypair
 struct noise_handshake
 {
     struct rnd_pool *rnd;
-    HMAC_CTX *evp_hmac;
+    EVP_MAC_CTX *evp_hmac;
     EVP_MD_CTX *evp_md;
     EVP_CIPHER_CTX *evp_cipher;
 
@@ -1117,18 +1116,18 @@ static u32 noise_hash(EVP_MD_CTX *md,
 }
 
 
-static inline u32 noise_hmac_hash(HMAC_CTX *hmac,
+static inline u32 noise_hmac_hash(EVP_MAC_CTX *hmac,
                                   const u8 key[NOISE_HASHLEN],
                                   const void *data, const u32 data_len,
                                   u8 output[NOISE_HASHLEN])
 {
-    if (HMAC_Init_ex(hmac, key, NOISE_HASHLEN, EVP_blake2b512(), NULL) != 1)
+    if (EVP_MAC_init(hmac, key, NOISE_HASHLEN, NULL) != 1)
         return 1;
 
-    if (HMAC_Update(hmac, data, data_len) != 1)
+    if (EVP_MAC_update(hmac, data, data_len) != 1)
         return 1;
 
-    if (HMAC_Final(hmac, output, NULL) != 1)
+    if (EVP_MAC_final(hmac, output, NULL, NOISE_HASHLEN) != 1)
         return 1;
 
     return 0;
@@ -1139,7 +1138,7 @@ static inline u32 noise_hmac_hash(HMAC_CTX *hmac,
  * noise spec has third output, but it is not used
  * in this handshake pattern so not included here
  */
-static u32 noise_hkdf(HMAC_CTX *hmac, const u8 *ck,
+static u32 noise_hkdf(EVP_MAC_CTX *hmac, const u8 *ck,
                       const u8 *ikm, const u32 ikm_len,
                       u8 output1[NOISE_HASHLEN],
                       u8 output2[NOISE_HASHLEN])
@@ -1700,12 +1699,12 @@ enum
 
 static const struct __kernel_timespec rto_table[] =
     {
-        kts(0, 200),
-        kts(0, 200),
-        kts(0, 300),
-        kts(0, 300),
-        kts(0, 400),
-        kts(0, 400),
+        kts(0, 250),
+        kts(0, 250),
+        kts(0, 350),
+        kts(0, 350),
+        kts(0, 500),
+        kts(0, 500),
         kts(0, 500),
         kts(0, 500),
         kts(1, 0),
@@ -1906,6 +1905,7 @@ struct nmp_instance
     i32 local_tx;
     u32 options;
     sa_family_t sa_family;
+    struct __kernel_timespec kts;
 
     void *request_ctx;
     int (*request_cb)(struct nmp_rq_connect *, const u8 *, void *);
@@ -1921,7 +1921,8 @@ struct nmp_instance
 
     struct hash_table sessions;
 
-    HMAC_CTX *evp_hmac;
+    EVP_MAC *evp_mac;
+    EVP_MAC_CTX *evp_hmac;
     EVP_MD_CTX *evp_md;
     EVP_CIPHER_CTX *evp_cipher;
     struct noise_handshake noise_empty;
@@ -2061,38 +2062,34 @@ static u32 nmp_ring_timer_set(struct nmp_instance *nmp,
 #else /* NMP_DEBUG_TIMERS */
 
 
-static u32 nmp_ring_timer_update(struct nmp_instance *nmp,
-                                 struct nmp_session *ctx,
-                                 const struct __kernel_timespec kts)
+static u32 nmp_ring_timer_update(struct nmp_instance *nmp, void *ctx,
+                                 struct __kernel_timespec *ts)
 {
-    log("updating timer %xu [%lld:%lld]",
-        ctx->session_id, kts.tv_sec, kts.tv_nsec);
+    log("updating timer %p [%lld:%lld]",
+        ctx, ts->tv_sec, ts->tv_nsec / 1000000);
 
     struct io_uring_sqe *sqe = nmp_ring_sqe(nmp);
     if (sqe == NULL)
         return 1;
 
-    ctx->kts = kts;
-    io_uring_prep_timeout_update(sqe, &ctx->kts, (u64) ctx, 0);
+    io_uring_prep_timeout_update(sqe, ts, (u64) ctx, 0);
     io_uring_sqe_set_flags(sqe, IOSQE_CQE_SKIP_SUCCESS);
 
     return 0;
 }
 
 
-static u32 nmp_ring_timer_set(struct nmp_instance *nmp,
-                              struct nmp_session *ctx,
-                              const struct __kernel_timespec kts)
+static u32 nmp_ring_timer_set(struct nmp_instance *nmp, void *ctx,
+                              struct __kernel_timespec *ts)
 {
-    log("setting timer for %xu [%lld:%lld]",
-        ctx->session_id, kts.tv_sec, kts.tv_nsec);
+    log("setting timer for %p [%lld:%lld]",
+        ctx, ts->tv_sec, ts->tv_nsec / 1000000);
 
     struct io_uring_sqe *sqe = nmp_ring_sqe(nmp);
     if (sqe == NULL)
         return 1;
 
-    ctx->kts = kts;
-    io_uring_prep_timeout(sqe, &ctx->kts, 0, 0);
+    io_uring_prep_timeout(sqe, ts, 0, 0);
     io_uring_sqe_set_flags(sqe, IOSQE_CQE_SKIP_SUCCESS);
     io_uring_sqe_set_data(sqe, ctx);
 
@@ -2369,7 +2366,9 @@ static u32 session_request(struct nmp_instance *nmp, struct nmp_session *ctx)
 
     ctx->state = SESSION_STATUS_RESPONSE;
     ctx->stat_tx += sizeof(struct nmp_request);
-    return nmp_ring_timer_set(nmp, ctx, kts(SESSION_RETRY_INTERVAL, 0));
+    ctx->kts = kts(SESSION_RETRY_INTERVAL, 0);
+
+    return nmp_ring_timer_set(nmp, ctx, &ctx->kts);
 }
 
 
@@ -2398,7 +2397,9 @@ static u32 session_response(struct nmp_instance *nmp,
     ctx->state = SESSION_STATUS_CONFIRM;
     ctx->stat_tx += sizeof(struct nmp_response);
     ctx->response_retries = 0;
-    return nmp_ring_timer_set(nmp, ctx, kts(ctx->timer_keepalive, 0));
+    ctx->kts = kts(ctx->timer_keepalive, 0);
+
+    return nmp_ring_timer_set(nmp, ctx, &ctx->kts);
 }
 
 
@@ -2412,49 +2413,36 @@ static u32 session_data(struct nmp_instance *nmp, struct nmp_session *ctx)
     }
 
     u8 payload[MSG_MAX_PAYLOAD];
+    i32 amt;
 
-    for (;;)
+    while ((amt = msg_assemble(&ctx->transport, payload)))
     {
-        const i32 amt = msg_assemble(&ctx->transport, payload);
-        switch (amt)
+        if (amt == -1)
         {
-            case 0:
-            {
-                log("nothing to send");
-                return 0;
-            }
-
-            case -1:
-            {
-                log("marking full window");
-                ctx->state = SESSION_STATUS_WINDOW;
-                return 0;
-            }
-
-            default:
-            {
-                /*
-                 * checking for zero here because if flag for full window
-                 * is set then flag for ack wait is guaranteed to be set too
-                 * but if its ack wait only, this condition is still relevant
-                 */
-                if (ctx->state == SESSION_STATUS_ESTAB)
-                {
-                    log("idle send retries %u", ctx->response_retries);
-
-                    if (nmp_ring_timer_update(nmp, ctx, rto_table[ctx->timer_retries]))
-                        return 1;
-
-                    ctx->state = SESSION_STATUS_ACKWAIT;
-                }
-
-                if (session_transport_send(nmp, ctx,
-                                           payload, amt, NMP_DATA))
-                    return 1;
-
-                break;
-            }
+            log("marking full window");
+            ctx->state = SESSION_STATUS_WINDOW;
+            return 0;
         }
+
+        /*
+         * checking for zero here because if flag for full window
+         * is set then flag for ack wait is guaranteed to be set too
+         * but if its ack wait only, this condition is still relevant
+         */
+        if (ctx->state == SESSION_STATUS_ESTAB)
+        {
+            log("idle send retries %u", ctx->response_retries);
+
+            ctx->state = SESSION_STATUS_ACKWAIT;
+            ctx->kts = rto_table[ctx->timer_retries];
+
+            if (nmp_ring_timer_update(nmp, ctx, &ctx->kts))
+                return 1;
+        }
+
+        if (session_transport_send(nmp, ctx,
+                                   payload, amt, NMP_DATA))
+            return 1;
     }
 
     return 0;
@@ -2807,7 +2795,7 @@ static u32 event_timer(struct nmp_instance *nmp,
         nmp->stats_cb(ctx->stat_rx, ctx->stat_tx, ctx->context_ptr);
 
     /* reset to a previous value */
-    return nmp_ring_timer_set(nmp, ctx, ctx->kts);
+    return nmp_ring_timer_set(nmp, ctx, &ctx->kts);
 }
 
 
@@ -2832,7 +2820,8 @@ static u32 net_data_first(struct nmp_instance *nmp, struct nmp_session *ctx)
         nmp->status_cb(NMP_SESSION_INCOMING, NULL, ctx->context_ptr);
 
     /* there could be a custom interval set, update needed */
-    return nmp_ring_timer_update(nmp, ctx, kts(ctx->timer_keepalive, 0));
+    ctx->kts = kts(ctx->timer_keepalive, 0);
+    return nmp_ring_timer_update(nmp, ctx, &ctx->kts);
 }
 
 
@@ -3110,7 +3099,8 @@ static u32 net_response_accept(struct nmp_instance *nmp,
     if (session_keepalive(nmp, ctx))
         return 1;
 
-    return nmp_ring_timer_update(nmp, ctx, kts(ctx->timer_keepalive, 0));
+    ctx->kts = kts(ctx->timer_keepalive, 0);
+    return nmp_ring_timer_update(nmp, ctx, &ctx->kts);
 }
 
 
@@ -3371,8 +3361,12 @@ static i32 nmp_teardown(struct nmp_instance *nmp)
     if (nmp->evp_cipher)
         EVP_CIPHER_CTX_free(nmp->evp_cipher);
 
+    if (nmp->evp_mac)
+        EVP_MAC_free(nmp->evp_mac);
+
     if (nmp->evp_hmac)
-        HMAC_CTX_free(nmp->evp_hmac);
+        EVP_MAC_CTX_free(nmp->evp_hmac);
+
 
     const i32 descriptors[] =
         {
@@ -3563,8 +3557,24 @@ static u32 new_crypto(struct nmp_instance *nmp, struct nmp_conf *conf)
     if (rnd_reset_pool(&nmp->rnd))
         return 1;
 
-    nmp->evp_hmac = HMAC_CTX_new();
+    nmp->evp_mac = EVP_MAC_fetch(NULL, "hmac", "provider=default");
+    if (nmp->evp_mac == NULL)
+        return 1;
+
+    nmp->evp_hmac = EVP_MAC_CTX_new(nmp->evp_mac);
     if (nmp->evp_hmac == NULL)
+        return 1;
+
+    char digest[] = {'b', 'l', 'a', 'k', 'e',
+                     '2', 'b', '5', '1', '2', 0};
+
+    const OSSL_PARAM params[] =
+        {
+            OSSL_PARAM_construct_utf8_string("digest", digest, 10),
+            OSSL_PARAM_END,
+        };
+
+    if (EVP_MAC_CTX_set_params(nmp->evp_hmac, params) != 1)
         return 1;
 
     nmp->evp_md = EVP_MD_CTX_new();
@@ -3863,7 +3873,9 @@ static u32 run_events_deliver(struct nmp_instance *nmp,
             {
                 /* everything has been acked */
                 ctx->state = SESSION_STATUS_ESTAB;
-                if (nmp_ring_timer_update(nmp, ctx, kts(ctx->timer_keepalive, 0)))
+                ctx->kts = kts(ctx->timer_keepalive, 0);
+
+                if (nmp_ring_timer_update(nmp, ctx, &ctx->kts))
                     return 1;
 
                 break;
@@ -3897,18 +3909,27 @@ static u32 run_events_deliver(struct nmp_instance *nmp,
 }
 
 
-static u32 run_cqe_err(struct nmp_instance *nmp, struct io_uring_cqe *cqe)
+static u32 run_cqe_err(struct nmp_instance *nmp,
+                       struct io_uring_cqe *cqe)
 {
     void *ptr = io_uring_cqe_get_data(cqe);
 
     switch (-cqe->res)
     {
         case ETIME:
+        {
+            if (ptr == NULL)
+                return nmp_ring_timer_set(nmp, NULL, &nmp->kts);
+
             return event_timer(nmp, ptr);
+        }
 
         case ENOENT:
+            if (ptr == NULL)
+                return nmp_ring_timer_set(nmp, NULL, &nmp->kts);
+
             return nmp_ring_timer_set(nmp, ptr,
-                                      ((struct nmp_session *) ptr)->kts);
+                                      &((struct nmp_session *) ptr)->kts);
 
         case ENOBUFS:
         {
@@ -3947,7 +3968,7 @@ static i32 run_cqe_process(struct nmp_instance *nmp,
             io_uring_cqe_get_data(cqe));
 
         if (run_cqe_err(nmp, cqe))
-            return 1;
+            return -1;
 
         return 0;
     }
@@ -3955,7 +3976,7 @@ static i32 run_cqe_process(struct nmp_instance *nmp,
     if ((cqe->flags & IORING_CQE_F_BUFFER) == 0)
     {
         log("unrecognized cqe %p", io_uring_cqe_get_data(cqe));
-        return 1;
+        return -1;
     }
 
     if (io_uring_cqe_get_data(cqe) == &nmp->net_udp)
@@ -3969,12 +3990,12 @@ static i32 run_cqe_process(struct nmp_instance *nmp,
 }
 
 
-i32 run_wait_cqes(struct nmp_instance *nmp, struct io_uring_cqe **cqes)
+static i32 run_wait_cqe(struct nmp_instance *nmp)
 {
     const i32 submitted = io_uring_submit_and_wait(&nmp->ring, 1);
     if (submitted < 0)
     {
-        log("wait interrupted: %s", strerrorname_np(-submitted));
+        log("submit and wait: %s", strerrorname_np(-submitted));
 
         /* -errno */
         switch (-submitted)
@@ -3987,50 +4008,75 @@ i32 run_wait_cqes(struct nmp_instance *nmp, struct io_uring_cqe **cqes)
         }
     }
 
-    return (i32) io_uring_peek_batch_cqe(&nmp->ring, cqes, RING_BATCH);
+    return 0;
 }
 
 
-i32 nmp_run(struct nmp_instance *nmp, const i32 timeout)
+static i32 run_process_batch(struct nmp_instance *nmp,
+                             struct nmp_session **queue)
 {
-    UNUSED(timeout); // fixme
-    struct io_uring_cqe *cqes[RING_BATCH] = {0};
-    struct nmp_session *events_queue[RING_BATCH] = {0};
+    struct nmp_session *ctx = NULL;
+    struct io_uring_cqe *cqe = NULL;
+    u32 head = 0;
+    i32 items = 0;
+    u32 cqes = 0;
 
-    for (;;)
+    io_uring_for_each_cqe(&nmp->ring, head, cqe)
     {
-        u32 queued = 0;
-        i32 batch = run_wait_cqes(nmp, cqes);
-        if (batch < 0)
-            return -1;
-
-        for (i32 i = 0; i < batch; i++)
+        const i32 res = run_cqe_process(nmp, cqe, &ctx);
+        if (res)
         {
-            struct nmp_session *ctx = NULL;
-
-            switch (run_cqe_process(nmp, cqes[i], &ctx))
-            {
-                case 0:
-                    break;
-                case 1:
-                    return nmp_teardown(nmp);
-                default:
-                    return 1;
-            }
-
-            if (ctx)
-            {
-                events_queue[queued] = ctx;
-                queued += 1;
-            }
+            // fixme
+            items = -1;
+            break;
         }
 
-        io_uring_cq_advance(&nmp->ring, batch);
+        if (ctx)
+        {
+            queue[items] = ctx;
+            items += 1;
+        }
 
-        for (u32 i = 0; i < queued; i++)
+        cqes += 1;
+    }
+
+    io_uring_cq_advance(&nmp->ring, cqes);
+    return items;
+}
+
+
+i32 nmp_run(struct nmp_instance *nmp, const u32 timeout)
+{
+    i32 queued = 0;
+    struct nmp_session *events_queue[RING_BATCH] = {0};
+
+    if (timeout)
+    {
+        nmp->kts = kts(0, timeout);
+        if (nmp_ring_timer_set(nmp, NULL, &nmp->kts))
+            return 1;
+    }
+
+    while (run_wait_cqe(nmp) == 0)
+    {
+        queued = run_process_batch(nmp, events_queue);
+        if (queued < 0)
+            break;
+
+        for (i32 i = 0; i < queued; i++)
         {
             if (run_events_deliver(nmp, events_queue[i]))
                 return 1;
         }
+    }
+
+    switch(-queued)
+    {
+        case 2:
+            return nmp_teardown(nmp);
+
+        case 1:
+        default:
+            return 1;
     }
 }
