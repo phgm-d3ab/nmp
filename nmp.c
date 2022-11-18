@@ -197,114 +197,6 @@ static u32 rnd_get32()
 
 
 /*
- *  https://en.wikipedia.org/wiki/SipHash
- */
-enum
-{
-    SIPHASH_KEY = 16,
-    SIPHASH_C = 2,
-    SIPHASH_D = 4,
-};
-
-#define rotl64(x, n) ((u64)((x) << (n)) | ((x) >> (-(n) & 63)))
-
-#define u8_u64le(x)           \
-(                             \
-    ((u64) (x)[0]        |    \
-    ((u64) (x)[1] << 8)  |    \
-    ((u64) (x)[2] << 16) |    \
-    ((u64) (x)[3] << 24) |    \
-    ((u64) (x)[4] << 32) |    \
-    ((u64) (x)[5] << 40) |    \
-    ((u64) (x)[6] << 48) |    \
-    ((u64) (x)[7] << 56) )    \
-)
-
-
-static inline void sip_round(u64 v[4])
-{
-    v[0] += v[1];
-    v[1] = rotl64(v[1], 13);
-    v[1] ^= v[0];
-    v[0] = rotl64(v[0], 32);
-    v[2] += v[3];
-    v[3] = rotl64(v[3], 16);
-    v[3] ^= v[2];
-
-    v[0] += v[3];
-    v[3] = rotl64(v[3], 21);
-    v[3] ^= v[0];
-
-    v[2] += v[1];
-    v[1] = rotl64(v[1], 17);
-    v[1] ^= v[2];
-    v[2] = rotl64(v[2], 32);
-}
-
-
-static u64 siphash(const u8 *key, const u8 *data, const u32 len)
-{
-    const u64 k0 = u8_u64le((key));
-    const u64 k1 = u8_u64le((key + 8));
-
-    u64 v[4] =
-        {
-            k0 ^ 0x736f6d6570736575,
-            k1 ^ 0x646f72616e646f6d,
-            k0 ^ 0x6c7967656e657261,
-            k1 ^ 0x7465646279746573,
-        };
-
-
-    const u32 len_aligned = len & ~7;
-    const u32 len_remainder = len - len_aligned;
-
-    for (u32 i = 0; i < len_aligned; i += 8)
-    {
-        const u64 m = u8_u64le((data + i));
-
-        v[3] ^= m;
-
-        for (u32 n = 0; n < SIPHASH_C; n++)
-        {
-            sip_round(v);
-        }
-
-        v[0] ^= m;
-    }
-
-    u64 remainder = (u64) (len & 0xff) << 56;
-    if (len_remainder)
-    {
-        data += len_aligned;
-
-        for (u32 i = 0; i < len_remainder; i++)
-        {
-            remainder |= (u64) data[i] << (i * 8);
-        }
-    }
-
-    v[3] ^= remainder;
-
-    for (u32 n = 0; n < SIPHASH_C; n++)
-    {
-        sip_round(v);
-    }
-
-    v[0] ^= remainder;
-
-    v[2] ^= 0xff;
-
-    for (u32 i = 0; i < SIPHASH_D; i++)
-    {
-        sip_round(v);
-    }
-
-    return (v[0] ^ v[1] ^ v[2] ^ v[3]);
-}
-
-
-/*
  *  https://en.wikipedia.org/wiki/Open_addressing
  *  https://en.wikipedia.org/wiki/Lazy_deletion
  */
@@ -313,7 +205,19 @@ enum
     HT_SIZE = NMP_SESSIONS_MAX, /* @nmp.h */
     HT_RSIZE = (HT_SIZE * 2),
     HT_NOT_FOUND = (HT_SIZE + 1),
-    HT_CACHE = (HT_SIZE / 8),
+    HT_CACHE = (HT_SIZE / 4),
+};
+
+
+/*
+ * https://en.wikipedia.org/wiki/SipHash
+ */
+enum
+{
+    HT_SIPHASH_KEY = 16,
+    HT_SIPHASH_C = 2,
+    HT_SIPHASH_D = 4,
+    HT_SIPHASH_OUTSIZE = 8,
 };
 
 static_assert_pow2(HT_RSIZE);
@@ -327,35 +231,53 @@ enum ht_entry_status
 };
 
 
+struct ht_cache_entry
+{
+    u32 id;
+    u64 hash;
+};
+
+
+struct ht_entry
+{
+    enum ht_entry_status status;
+    u32 id;
+    void *ptr;
+};
+
+
 struct hash_table
 {
+    EVP_MAC *evp_mac;
+    EVP_MAC_CTX *evp_ctx;
     u32 items;
-    u8 key[SIPHASH_KEY];
 
-    struct
-    {
-        u32 id;
-        u64 hash;
-
-    } cache[HT_CACHE];
-
-    struct
-    {
-        enum ht_entry_status status;
-        u32 id;
-        void *ptr;
-
-    } entry[HT_RSIZE];
+    struct ht_cache_entry cache[HT_CACHE];
+    struct ht_entry entry[HT_RSIZE];
 };
 
 
 static u64 ht_hash(struct hash_table *ht, const u32 key)
 {
+    u64 hash;
     const u32 index = key & (HT_CACHE - 1);
+
     if (ht->cache[index].id == key)
         return ht->cache[index].hash;
 
-    const u64 hash = siphash(ht->key, (const u8 *) &key, sizeof(u32));
+
+    if (EVP_MAC_init(ht->evp_ctx, NULL, 0, NULL) != 1)
+        return 0;
+
+    if (EVP_MAC_update(ht->evp_ctx,
+                       (const unsigned char *) &key, sizeof(u32)) != 1)
+        return 0;
+
+    if (EVP_MAC_final(ht->evp_ctx, (u8 *) &hash,
+                      NULL, HT_SIPHASH_OUTSIZE) != 1)
+        return 0;
+
+
     ht->cache[index].id = key;
     ht->cache[index].hash = hash;
 
@@ -462,7 +384,46 @@ static void ht_remove(struct hash_table *ht, const u32 id)
 }
 
 
-static i32 ht_wipe(struct hash_table *ht, u32 (*destructor)(void *))
+static i32 ht_init(struct hash_table *ht,
+                   u8 key[HT_SIPHASH_KEY])
+{
+    ht->evp_mac = EVP_MAC_fetch(NULL, "siphash", "provider=default");
+    if (ht->evp_mac == NULL)
+        return -1;
+
+    u32 c_rounds = HT_SIPHASH_C;
+    u32 d_rounds = HT_SIPHASH_D;
+    u32 outsize = HT_SIPHASH_OUTSIZE;
+
+    const OSSL_PARAM params[] = {
+        OSSL_PARAM_construct_octet_string("key", key, HT_SIPHASH_KEY),
+        OSSL_PARAM_construct_uint32("size", &outsize),
+        OSSL_PARAM_construct_uint32("c-rounds", &c_rounds),
+        OSSL_PARAM_construct_uint32("d-rounds", &d_rounds),
+        OSSL_PARAM_END
+    };
+
+
+    ht->evp_ctx = EVP_MAC_CTX_new(ht->evp_mac);
+    if (ht->evp_ctx == NULL)
+    {
+        EVP_MAC_free(ht->evp_mac);
+        return -1;
+    }
+
+    if (EVP_MAC_CTX_set_params(ht->evp_ctx, params) != 1)
+    {
+        EVP_MAC_CTX_free(ht->evp_ctx);
+        EVP_MAC_free(ht->evp_mac);
+        return -1;
+    }
+
+    return 0;
+}
+
+
+static i32 ht_teardown(struct hash_table *ht,
+                       u32 (*destructor)(void *))
 {
     for (u32 i = 0; ht->items && i < HT_RSIZE; i++)
     {
@@ -473,6 +434,8 @@ static i32 ht_wipe(struct hash_table *ht, u32 (*destructor)(void *))
         }
     }
 
+    EVP_MAC_CTX_free(ht->evp_ctx);
+    EVP_MAC_free(ht->evp_mac);
     return 0;
 }
 
@@ -775,7 +738,8 @@ u32 msg_assemble_noack(struct msg_header *header,
     header->len |= MSG_NOACK;
 
     mem_copy(header->data, payload, len);
-    return msg_payload_zeropad(header->data, (i32) (len + sizeof(struct msg_header)));
+    return msg_payload_zeropad(header->data,
+                               (i32) (len + sizeof(struct msg_header)));
 }
 
 
@@ -1180,23 +1144,28 @@ static inline u32 noise_dh(EVP_MD_CTX *evp_md,
         return 1;
 
     if (EVP_PKEY_derive_init(key_pair->evp_dh) != 1)
-        return 1;
+        goto out_fail;
 
     if (EVP_PKEY_derive_set_peer(key_pair->evp_dh, remote_pub) != 1)
-        return 1;
+        goto out_fail;
 
     if (EVP_PKEY_derive(key_pair->evp_dh, temp, &dhlen) != 1)
-        return 1;
-
-    EVP_PKEY_free(remote_pub);
+        goto out_fail;
 
     u8 temp_dh[NOISE_HASHLEN] = {0};
     if (noise_hash(evp_md, temp, NOISE_DHLEN, temp_dh))
-        return 1;
+        goto out_fail;
 
     /* discard some bytes */
     mem_copy(shared_secret, temp_dh, NOISE_DHLEN);
+    EVP_PKEY_free(remote_pub);
     return 0;
+
+    out_fail:
+    {
+        EVP_PKEY_free(remote_pub);
+        return 1;
+    };
 }
 
 
@@ -3343,8 +3312,8 @@ static i32 nmp_teardown(struct nmp_instance *nmp)
 {
     errno = 0;
 
-    if (ht_wipe(&nmp->sessions, (void *) session_destroy))
-        return 1;
+    if (ht_teardown(&nmp->sessions, (void *) session_destroy))
+        return -1;
 
     if (nmp->recv_net.ring)
         munmap(nmp->recv_net.ring, nmp->recv_net.size);
@@ -3395,13 +3364,13 @@ static i32 nmp_teardown(struct nmp_instance *nmp)
 }
 
 
-static u32 new_base(struct nmp_instance *nmp, struct nmp_conf *conf)
+static i32 new_base(struct nmp_instance *nmp, struct nmp_conf *conf)
 {
     const sa_family_t sa_family = conf->addr.sa.sa_family ? : AF_INET;
     if (sa_family != AF_INET && sa_family != AF_INET6)
     {
         log("sa_family");
-        return 1;
+        return -1;
     }
 
     nmp->sa_family = sa_family;
@@ -3416,11 +3385,15 @@ static u32 new_base(struct nmp_instance *nmp, struct nmp_conf *conf)
     nmp->transport_callbacks.data_noack = conf->data_noack_cb;
     nmp->transport_callbacks.ack = conf->ack_cb;
 
-    return 0;
+    u8 ht_key[HT_SIPHASH_KEY];
+    if (rnd_get(ht_key, HT_SIPHASH_KEY))
+        return -1;
+
+    return ht_init(&nmp->sessions, ht_key);
 }
 
 
-static u32 new_ring(struct nmp_instance *nmp)
+static i32 new_ring(struct nmp_instance *nmp)
 {
     struct io_uring_params params = {0};
     params.cq_entries = RING_CQ;
@@ -3430,10 +3403,7 @@ static u32 new_ring(struct nmp_instance *nmp)
                    | IORING_SETUP_COOP_TASKRUN
                    | IORING_SETUP_CQSIZE;
 
-    if (io_uring_queue_init_params(RING_SQ, &nmp->ring, &params))
-        return 1;
-
-    return 0;
+    return io_uring_queue_init_params(RING_SQ, &nmp->ring, &params);
 }
 
 
@@ -3645,9 +3615,6 @@ struct nmp_instance *nmp_new(struct nmp_conf *conf)
         goto out_fail;
 
 
-    if (rnd_get_bytes(&tmp->rnd, tmp->sessions.key, SIPHASH_KEY))
-        goto out_fail;
-
     if (nmp_ring_recv_net(tmp))
         goto out_fail;
 
@@ -3758,12 +3725,12 @@ static void submit_cleanup(struct nmp_rq *rq, const i32 num_ops)
         switch (rq->op)
         {
             case NMP_OP_CONNECT:
-                if (rq->session_id && rq->entry_arg)
+                if (rq->session_id)
                     session_destroy(rq->entry_arg);
                 continue;
 
             case NMP_OP_SEND:
-                if ((rq->msg_flags & NMP_F_MSG_NOALLOC) == 0 && rq->entry_arg)
+                if ((rq->msg_flags & NMP_F_MSG_NOALLOC) == 0)
                     mem_free(rq->entry_arg);
                 continue;
 
@@ -3774,7 +3741,8 @@ static void submit_cleanup(struct nmp_rq *rq, const i32 num_ops)
 }
 
 
-int nmp_submit(struct nmp_instance *nmp, struct nmp_rq *rqs, const int num_ops)
+int nmp_submit(struct nmp_instance *nmp,
+               struct nmp_rq *rqs, const int num_ops)
 {
     if (!nmp || !rqs)
         return 1;
@@ -4070,7 +4038,7 @@ i32 nmp_run(struct nmp_instance *nmp, const u32 timeout)
         }
     }
 
-    switch(-queued)
+    switch (-queued)
     {
         case 2:
             return nmp_teardown(nmp);
