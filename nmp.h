@@ -22,8 +22,8 @@ typedef struct nmp_instance nmp_t;
 #define NMP_F_MSG_NOALLOC   (1u << 2)
 
 /*
- * do not require acknowledgement for this message. this also means message is sent immediately
- * without any buffering, order is not preserved
+ * do not require acknowledgement for this message. this also means message
+ * is sent immediately without any buffering, order is not preserved
  */
 #define NMP_F_MSG_NOACK     (1u << 3)
 
@@ -82,10 +82,18 @@ enum nmp_rq_ops
 enum nmp_status
 {
     /* useful when returning empty command from callbacks that discard result */
-    NMP_CMD_EMPTY = 0,
+    NMP_STATUS_ZERO = 0,
 
+    /* accept received initiation/response and proceed with this session */
     NMP_CMD_ACCEPT,
+
+    /*
+     * instructs request callback to send a valid response
+     * but not to establish a full session
+     */
     NMP_CMD_RESPOND,
+
+    /* instructs to drop this session immediately and not send any data */
     NMP_CMD_DROP,
 
     /*
@@ -105,27 +113,55 @@ enum nmp_status
     NMP_SESSION_INCOMING,
 
     /*
-     * queue is full: outgoing message was not queued for sending.
-     * nmp_cb_status holds .user_data of message failed to queue
-     */
-    NMP_SESSION_QUEUE,
-
-    /*
-     * limit on the maximum amount of sessions has been reached,
-     * could not start newly requested one.
-     * id of cancelled session is stored in nmp_cb_status
-     */
-    NMP_SESSION_MAX,
-
-    /*
      * no more data can be sent over this session, and it is dropped immediately
      * note: this happens only when running out of nonces, in a very
      * unlikely event when 2^64 - 1 packets were sent over network
      */
     NMP_SESSION_EXPIRED,
 
+    /*
+     * queue is full: outgoing message was not queued for sending.
+     * nmp_cb_status holds .user_data of message failed to queue
+     */
+    NMP_ERR_QUEUE,
+
+    /*
+     * limit on the maximum amount of sessions has been reached,
+     * could not start newly requested one.
+     * id of cancelled session is stored in nmp_cb_status
+     */
+    NMP_ERR_MAXCONN,
+
     /* remote peer violates protocol, session terminated */
     NMP_ERR_PROTOCOL,
+
+    /* op supplied in nmp_submit() contained errors and was rejected */
+    NMP_ERR_INVAL,
+
+    /*
+     * sending data failed, nmp_cb_status holds address of remote peer; errno is
+     * set appropriately. return DROP/ZERO to drop this session or discard error
+     */
+    NMP_ERR_SEND,
+
+
+    /* critical errors */
+    NMP_ERR_IORING,
+    NMP_ERR_CRYPTO,
+    NMP_ERR_RND,    /* getrandom() */
+    NMP_ERR_TIME,   /* clock_gettime() */
+
+    NMP_ERR_SOCKET,
+    NMP_ERR_BIND,
+    NMP_ERR_SOCKPAIR,
+    NMP_ERR_MMAP,
+    NMP_ERR_UNMAP,
+    NMP_ERR_WRITE,
+    NMP_ERR_CLOSE,
+    NMP_ERR_GETSOCKNAME,
+    NMP_ERR_MALLOC,
+
+    NMP_STATUS_LAST,
 };
 
 
@@ -195,7 +231,7 @@ struct nmp_rq
     /* application defined data */
     uint64_t user_data;
 
-    /*  */
+    /* holds pointer to various objects required by requested op */
     void *entry_arg;
 };
 
@@ -215,6 +251,9 @@ union nmp_cb_status
 
 struct nmp_conf
 {
+    /* if nmp_new() fails, it sets an error code */
+    enum nmp_status err;
+
     /* address to bind to */
     union nmp_sa addr;
 
