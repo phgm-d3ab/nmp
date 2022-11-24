@@ -22,10 +22,12 @@ set_target_properties(${PROJECT_NAME} PROPERTIES PUBLIC_HEADER nmp.h)
 install(TARGETS ${PROJECT_NAME})
 
 if (CMAKE_BUILD_TYPE MATCHES Debug)
+    set(NMP_DBG_ENV $ENV{NMP_DEBUG})
+    if (NOT DEFINED NMP_DBG_ENV)
+        set(NMP_DBG_ENV <stdio.h>)
+    endif ()
 
-    target_compile_definitions(nmp PRIVATE NMP_DEBUG)
-    # strerrorname_np()
-    target_compile_definitions(${PROJECT_NAME} PRIVATE _GNU_SOURCE)
+    target_compile_definitions(nmp PRIVATE NMP_DEBUG=${NMP_DBG_ENV})
 
     # disable timers
     #target_compile_definitions(nmp PRIVATE NMP_DEBUG_TIMERS)
