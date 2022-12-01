@@ -154,7 +154,6 @@ enum nmp_status {
         NMP_ERR_MMAP,
         NMP_ERR_UNMAP,
         NMP_ERR_WRITE,
-        NMP_ERR_CLOSE,
         NMP_ERR_GETSOCKNAME,
         NMP_ERR_MALLOC,
 
