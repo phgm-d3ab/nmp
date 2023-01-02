@@ -322,7 +322,7 @@ static i32 chacha20poly1305_decrypt(struct chacha20poly1305_ctx ctx,
                                 CHACHA20POLY1305_TAGLEN, mac) != 1)
                 return -1;
 
-        return (EVP_DecryptFinal(ctx.evp_ctx, plaintext + outlen,
+        return (EVP_DecryptFinal(ctx.evp_ctx, ((u8 *) plaintext) + outlen,
                                  &outlen) != 1);
 
 }
@@ -437,19 +437,10 @@ enum {
 
 
 enum {
-        IOR_BGID_RES = 0,
-        IOR_BGID_UDP = 1,
-        IOR_BGID_SPAIR = 2,
-};
-
-
-struct ior_udp_pbuf {
-        u8 data[IOR_UDP_PBUFSIZE];
-};
-
-
-struct ior_spair_pbuf {
-        u8 data[IOR_SOCPAIR_PBUFSIZE];
+        IOR_CQE_UDP = 0,
+        IOR_CQE_SP = 1,
+        IOR_CQE_TIMER = 2,
+        IOR_CQE_ERR = 3,
 };
 
 
@@ -545,13 +536,18 @@ static i32 ior_pbuf_setup(struct ior *ctx, struct ior_pbuf *cfg)
 }
 
 
+struct ior_udp_pbuf {
+        u8 data[IOR_UDP_PBUFSIZE];
+};
+
+
 static i32 ior_udp_setup(struct ior *ctx, const int udp_soc)
 {
         struct ior_pbuf cfg = {0};
 
         cfg.item_size = sizeof(struct ior_udp_pbuf);
         cfg.items_amt = IOR_RECV_BUFS;
-        cfg.bgid = IOR_BGID_UDP;
+        cfg.bgid = IOR_CQE_UDP;
 
         if (ior_pbuf_setup(ctx, &cfg))
                 return 1;
@@ -573,9 +569,9 @@ static i32 ior_udp_recv(struct ior *ctx)
                 return 1;
 
         io_uring_prep_recvmsg_multishot(sqe, ctx->udp_soc, &ctx->udp_hdr, 0);
-        io_uring_sqe_set_data(sqe, ctx);
+        io_uring_sqe_set_data(sqe, NULL);
         sqe->flags = IOSQE_BUFFER_SELECT;
-        sqe->buf_group = IOR_BGID_UDP;
+        sqe->buf_group = IOR_CQE_UDP;
 
         return 0;
 }
@@ -622,13 +618,18 @@ static void ior_udp_pbuf_reuse(struct ior *ctx,
 }
 
 
+struct ior_spair_pbuf {
+        u8 data[IOR_SOCPAIR_PBUFSIZE];
+};
+
+
 static i32 ior_socpair_setup(struct ior *ctx, const int recv_soc)
 {
         struct ior_pbuf cfg = {0};
 
         cfg.item_size = sizeof(struct ior_spair_pbuf);
         cfg.items_amt = IOR_RECV_BUFS;
-        cfg.bgid = IOR_BGID_SPAIR;
+        cfg.bgid = IOR_CQE_SP;
 
         if (ior_pbuf_setup(ctx, &cfg))
                 return 1;
@@ -649,9 +650,9 @@ static i32 ior_socpair_recv(struct ior *ctx)
                 return 1;
 
         io_uring_prep_recv_multishot(sqe, ctx->sp_soc, NULL, 0, 0);
-        io_uring_sqe_set_data(sqe, NULL);
+        io_uring_sqe_set_data(sqe, ctx);
         sqe->flags = IOSQE_BUFFER_SELECT;
-        sqe->buf_group = IOR_BGID_SPAIR;
+        sqe->buf_group = IOR_CQE_SP;
 
         return 0;
 }
@@ -732,14 +733,14 @@ static i32 ior_wait_cqe(struct ior *ctx)
 }
 
 
-static inline u32 ior_cqe_bgid(const struct ior *ctx,
+static inline u32 ior_cqe_kind(const struct ior *ctx,
                                const ior_cqe *cqe)
 {
         if (cqe->flags & IORING_CQE_F_BUFFER)
                 return (io_uring_cqe_get_data(cqe) == ctx) ?
-                       IOR_BGID_UDP : IOR_BGID_SPAIR;
+                       IOR_CQE_SP : IOR_CQE_UDP;
 
-        return IOR_BGID_RES;
+        return cqe->res ? IOR_CQE_ERR : IOR_CQE_TIMER;
 }
 
 
@@ -809,19 +810,34 @@ struct ior_timespec {
         struct __kernel_timespec kts;
 };
 
-#define ior_ts(sec_, ms_) (struct ior_timespec) \
-                        { .kts.tv_sec = (sec_), .kts.tv_nsec = ((ms_) * 1000000lu) }
+#define ior_ts_init(sec_, ms_) \
+                { .kts.tv_sec = (sec_), .kts.tv_nsec = ((ms_) * 1000000lu), }
+
+#define ior_ts(sec_, ms_) ((struct ior_timespec) ior_ts_init(sec_, ms_))
 
 
+/*
+ *  expired timer is not considered an error, so we link this
+ *  to nop so that this posts zero to cq instead of ETIME
+ */
 static i32 ior_timer_set(struct ior *ctx, struct ior_timespec *t, void *ref)
 {
         ior_sqe *sqe = ior_sqe_get(ctx);
         if (sqe == NULL)
                 return 1;
 
-        io_uring_prep_timeout(sqe, &t->kts, 0, 0);
-        io_uring_sqe_set_flags(sqe, IOSQE_CQE_SKIP_SUCCESS);
+        io_uring_prep_timeout(sqe, &t->kts, 0,
+                              IORING_TIMEOUT_ETIME_SUCCESS);
+        io_uring_sqe_set_flags(sqe, IOSQE_IO_LINK | IOSQE_CQE_SKIP_SUCCESS);
         io_uring_sqe_set_data(sqe, ref);
+
+        sqe = ior_sqe_get(ctx);
+        if (sqe == NULL)
+                return 1;
+
+        io_uring_prep_nop(sqe);
+        io_uring_sqe_set_data(sqe, ref);
+
         return 0;
 }
 
@@ -853,7 +869,7 @@ static i32 ior_timer_del(struct ior *ctx, void *ref)
 /*
  *  time
  */
-static u64 time_get()
+static u64 time_get(void)
 {
         struct timespec ts = {0};
         if (clock_gettime(CLOCK_TAI, &ts))
@@ -919,7 +935,7 @@ static u32 rnd_get_bytes(struct rnd_pool *rnd, void *out, const u32 amt)
 }
 
 
-static u32 rnd_get32()
+static u32 rnd_get32(void)
 {
         u32 tmp = 0;
 
@@ -1095,7 +1111,7 @@ static i32 ht_init(struct hash_table *ht,
 
 
 static void ht_teardown(struct hash_table *ht,
-                        u32 (*destructor)(void *))
+                        void (destructor)(void *))
 {
         for (u32 i = 0; ht->items && i < HT_RSIZE; i++) {
                 if (ht->entry[i].ptr) {
@@ -1599,6 +1615,8 @@ static i32 msg_deliver_ack(const struct msg_routines *cb,
  *   -> e, es, s, ss
  *   <- e, ee, se
  */
+#define NOISE_NONCE_MAX UINT64_MAX
+
 enum {
         NOISE_KEYLEN = 32,
         NOISE_HASHLEN = BLAKE2B_HASHLEN,
@@ -1606,11 +1624,6 @@ enum {
         NOISE_AEAD_MAC = CHACHA20POLY1305_TAGLEN,
         NOISE_HANDSHAKE_PAYLOAD = 128,
         NOISE_COUNTER_WINDOW = 224,
-};
-
-
-enum {
-        NOISE_NONCE_MAX = UINT64_MAX,
 };
 
 
@@ -2164,24 +2177,24 @@ enum {
 
 
 static const struct ior_timespec rto_table[] = {
-        ior_ts(0, 250),
-        ior_ts(0, 250),
-        ior_ts(0, 350),
-        ior_ts(0, 350),
-        ior_ts(0, 500),
-        ior_ts(0, 500),
-        ior_ts(0, 500),
-        ior_ts(0, 500),
-        ior_ts(1, 0),
-        ior_ts(1, 0),
-        ior_ts(1, 0),
-        ior_ts(1, 0),
-        ior_ts(1, 0),
-        ior_ts(1, 0),
-        ior_ts(1, 0),
-        ior_ts(1, 0),
-        ior_ts(1, 0),
-        ior_ts(1, 0),
+        ior_ts_init(0, 250),
+        ior_ts_init(0, 250),
+        ior_ts_init(0, 350),
+        ior_ts_init(0, 350),
+        ior_ts_init(0, 500),
+        ior_ts_init(0, 500),
+        ior_ts_init(0, 500),
+        ior_ts_init(0, 500),
+        ior_ts_init(1, 0),
+        ior_ts_init(1, 0),
+        ior_ts_init(1, 0),
+        ior_ts_init(1, 0),
+        ior_ts_init(1, 0),
+        ior_ts_init(1, 0),
+        ior_ts_init(1, 0),
+        ior_ts_init(1, 0),
+        ior_ts_init(1, 0),
+        ior_ts_init(1, 0),
 };
 
 
@@ -2194,7 +2207,7 @@ enum retries {
         SESSION_RETRY_RESPONSE = 10,
 
         /* how many times to retry sending data */
-        SESSION_RETRY_DATA = (sizeof(rto_table) / sizeof(struct __kernel_timespec)),
+        SESSION_RETRY_DATA = (sizeof(rto_table) / sizeof(struct ior_timespec)),
 
         /* how often (in seconds) to retry sending data */
         SESSION_RETRY_INTERVAL = 1,
@@ -2365,7 +2378,9 @@ static i32 session_new(struct nmp_rq_connect *rq,
         mem_zero(ctx, sizeof(struct nmp_session));
         mem_zero(ini, sizeof(struct nmp_session_init));
 
-        const u8 ka_to = rq->keepalive_timeout ? : NMP_KEEPALIVE_TIMEOUT;
+        const u8 ka_to = rq->keepalive_timeout ?
+                         rq->keepalive_timeout : NMP_KEEPALIVE_TIMEOUT;
+
         u8 ka_int = rq->keepalive_messages ?
                     (ka_to / rq->keepalive_messages) :
                     (ka_to / NMP_KEEPALIVE_MESSAGES);
@@ -2426,8 +2441,10 @@ static i32 session_new(struct nmp_rq_connect *rq,
 }
 
 
-static void session_destroy(struct nmp_session *ctx)
+static void session_destroy(void *ptr)
 {
+        struct nmp_session *ctx = ptr;
+
         msg_context_wipe(&ctx->transport);
         chacha20poly1305_free(&ctx->noise_key_send);
         chacha20poly1305_free(&ctx->noise_key_recv);
@@ -3424,7 +3441,7 @@ static i32 event_net(struct nmp_instance *nmp,
 
 static i32 nmp_teardown(struct nmp_instance *nmp)
 {
-        ht_teardown(&nmp->sessions, (void *) session_destroy);
+        ht_teardown(&nmp->sessions, session_destroy);
 
 
         blake2b_free(&nmp->hash);
@@ -3441,7 +3458,8 @@ static i32 nmp_teardown(struct nmp_instance *nmp)
 
 static i32 new_base(struct nmp_instance *nmp, struct nmp_conf *conf)
 {
-        const sa_family_t sa_family = conf->addr.sa.sa_family ? : AF_INET;
+        const sa_family_t sa_family = conf->addr.sa.sa_family ?
+                                      conf->addr.sa.sa_family : AF_INET;
         if (sa_family != AF_INET && sa_family != AF_INET6)
                 return NMP_ERR_INVAL;
 
@@ -3808,38 +3826,39 @@ static i32 run_events_deliver(struct nmp_instance *nmp,
 }
 
 
-static i32 run_process_bgid_zero(struct nmp_instance *nmp,
-                                 const ior_cqe *cqe)
+static i32 run_process_err(struct nmp_instance *nmp,
+                           const ior_cqe *cqe)
 {
-        void *data = ior_cqe_data(cqe);
+        struct nmp_session *ctx = ior_cqe_data(cqe);
         const i32 err = ior_cqe_err(cqe);
-        if (err == 0) {
-                /*
-                 * nothing we submit to io_uring posts zero to
-                 * completion queue (IOSQE_CQE_SKIP_SUCCESS)
-                 */
+        if (err == 0)
                 return NMP_ERR_IORING;
-        }
+
 
         switch (err) {
-        case ETIME: /* timers */
-                return data ? event_timer(nmp, data)
-                            : ior_timer_set(&nmp->io, &nmp->its, NULL);
+        case ECANCELED: /* timers */
+                return 0;
 
         case ENOENT: /* timers */
-                return data ?
-                       ior_timer_set(&nmp->io, &((struct nmp_session *) data)->its, data)
-                            : ior_timer_set(&nmp->io, &nmp->its, NULL);
+                return ior_timer_set(&nmp->io, &ctx->its, ctx);
 
-        case EPERM: /* sendmsg() */
-                if (data == NULL)
+        case EACCES: /* sendmsg */
+        case EPERM:
+        case ENETUNREACH:
+        case ENETDOWN:
+                if (ctx == NULL) {
+                        /* discard error of CMD_RESPOND, no owner */
+                        return 0;
+                }
+
+                if (ctx->state == SESSION_STATUS_NONE)
                         return 0;
 
-                struct nmp_session *ctx = data;
                 const union nmp_cb_status perm = {
                         .addr = ctx->addr,
                 };
 
+                errno = err;
                 if (nmp->status_cb &&
                     nmp->status_cb(NMP_ERR_SEND, &perm, ctx->context_ptr) == NMP_CMD_DROP) {
                         ht_remove(&nmp->sessions, ctx->session_id);
@@ -3849,8 +3868,10 @@ static i32 run_process_bgid_zero(struct nmp_instance *nmp,
                 return 0;
 
         default:
-                return NMP_ERR_IORING;
+                break;
         }
+
+        return NMP_ERR_IORING;
 }
 
 
@@ -3858,6 +3879,7 @@ static i32 run_process_batch(struct nmp_instance *nmp,
                              struct nmp_session **queue)
 {
         struct nmp_session *ctx = NULL;
+        struct nmp_session *timer_ctx = NULL;
         ior_cqe *cqe = NULL;
         u32 head = 0;
         u32 cqes = 0;
@@ -3865,18 +3887,23 @@ static i32 run_process_batch(struct nmp_instance *nmp,
         i32 res = 0;
 
         ior_for_each_cqe(&nmp->io.ring, head, cqe) {
-                switch (ior_cqe_bgid(&nmp->io, cqe)) {
-                case IOR_BGID_UDP:
+                switch (ior_cqe_kind(&nmp->io, cqe)) {
+                case IOR_CQE_UDP:
                         res = event_net(nmp, cqe, &ctx);
                         break;
 
-                case IOR_BGID_SPAIR:
+                case IOR_CQE_SP:
                         res = event_local(nmp, cqe, &ctx);
                         break;
 
-                /* case IOR_BGID_RES: */
+                case IOR_CQE_TIMER:
+                        timer_ctx = ior_cqe_data(cqe);
+                        res = timer_ctx ? event_timer(nmp, timer_ctx)
+                                  : ior_timer_set(&nmp->io, &nmp->its, NULL);
+                        break;
+
                 default:
-                        res = run_process_bgid_zero(nmp, cqe);
+                        res = run_process_err(nmp, cqe);
                         break;
                 }
 
