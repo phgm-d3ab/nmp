@@ -26,6 +26,22 @@ typedef uint64_t u64;
 typedef size_t usize;
 
 
+typedef struct {
+        u16 val;
+} u16le;
+
+#define u16le_get(x_) le16toh((x_).val)
+#define u16le_set(x_) (u16le) {.val = htole16((x_))}
+
+
+typedef struct {
+        u64 val;
+} u64le;
+
+#define u64le_get(x_) le64toh((x_).val)
+#define u64le_set(x_) (u64le) {.val = htole64((x_))}
+
+
 /* cosmetics */
 #define UNUSED(arg_)    ((void)(arg_))
 #define static_assert_pow2(x_) \
@@ -764,7 +780,16 @@ static void ior_cq_advance(struct ior *ctx, const u32 items)
 
 static void ior_teardown(struct ior *ctx)
 {
+        if (ctx->udp_ring)
+                munmap(ctx->udp_ring, ctx->udp_ring_size);
 
+        if (ctx->sp_ring)
+                munmap(ctx->sp_ring, ctx->sp_ring_size);
+
+        close(ctx->udp_soc);
+        close(ctx->sp_soc);
+
+        io_uring_queue_exit(&ctx->ring);
 }
 
 
@@ -1160,16 +1185,16 @@ enum msg_rx_status {
 
 
 struct msg_header {
-        u16 sequence;
-        u16 len;
+        u16le sequence;
+        u16le len;
         u8 data[];
 };
 
 
 struct msg_ack {
-        u16 ack;
+        u16le ack;
         u16 pad[3];
-        u64 ack_mask;
+        u64le ack_mask;
 };
 
 
@@ -1247,21 +1272,21 @@ static inline i32 msg_payload_zeropad(u8 *payload, const i32 len)
 static inline void msg_tx_include(const struct msg_tx_entry *tx,
                                   struct msg_header *msg)
 {
-        msg->sequence = tx->seq;
-        msg->len = tx->len;
+        msg->sequence = u16le_set(tx->seq);
+        msg->len = u16le_set(tx->len);
 
         mem_copy(msg->data, tx->msg, tx->len);
 }
 
 
 static inline void msg_rx_copy(struct msg_rx_entry *entry,
-                               const struct msg_header *msg)
+                               const struct msg_header *msg, const u16 msg_len)
 {
         entry->status = MSG_RX_RECEIVED;
-        entry->seq = msg->sequence;
-        entry->len = msg->len;
+        entry->seq = u16le_get(msg->sequence);
+        entry->len = msg_len;
 
-        mem_copy(entry->data, msg->data, msg->len);
+        mem_copy(entry->data, msg->data, msg_len);
 }
 
 
@@ -1393,12 +1418,11 @@ static i32 msg_assemble_retry(const struct msg_state *ctx,
 }
 
 
-u32 msg_assemble_noack(struct msg_header *header,
-                       const u8 *payload, const u16 len)
+static u32 msg_assemble_noack(struct msg_header *header,
+                              const u8 *payload, const u16 len)
 {
-        header->sequence = 0;
-        header->len = len;
-        header->len |= MSG_NOACK;
+        header->sequence = u16le_set(0);
+        header->len = u16le_set(len | MSG_NOACK);
 
         mem_copy(header->data, payload, len);
         return msg_payload_zeropad(header->data,
@@ -1421,8 +1445,8 @@ static i32 msg_read(const struct msg_routines *cb, struct msg_state *ctx,
                 if ((len - iterator) <= sizeof(struct msg_header))
                         break;
 
-                const u16 msgseq = msg->sequence;
-                const u16 msglen_bits = msg->len;
+                const u16 msgseq = u16le_get(msg->sequence);
+                const u16 msglen_bits = u16le_get(msg->len);
                 if (msglen_bits & MSG_RESERVED)
                         return -1;
 
@@ -1460,7 +1484,7 @@ static i32 msg_read(const struct msg_routines *cb, struct msg_state *ctx,
                         struct msg_rx_entry *entry = rx_get(ctx, msgseq);
                         if (entry->status == MSG_RX_EMPTY) {
                                 new_messages += 1;
-                                msg_rx_copy(entry, msg);
+                                msg_rx_copy(entry, msg, msg_len);
                         }
                 }
 
@@ -1521,51 +1545,54 @@ static void msg_ack_assemble(const struct msg_state *ctx, struct msg_ack *ack)
                 shift += 1;
         }
 
-        ack->ack = seq_hi;
+        ack->ack = u16le_set(seq_hi);
         ack->pad[0] = 0;
         ack->pad[1] = 0;
         ack->pad[2] = 0;
-        ack->ack_mask = mask;
+        ack->ack_mask = u64le_set(mask);
 }
 
 
-static i32 msg_ack_read(struct msg_state *ctx, const struct msg_ack *ack)
+static i32 msg_ack_read(struct msg_state *ctx,
+                        const struct msg_ack *ack_ptr)
 {
         i32 discovered = 0;
-        u64 mask = ack->ack_mask;
+        u64 mask = u64le_get(ack_ptr->ack_mask);
+        const u16 ack = u16le_get(ack_ptr->ack);
 
 
-        if (msg_sequence_cmp(ack->ack, ctx->tx_ack)) {
-                if (msg_sequence_cmp(ack->ack, ctx->tx_sent)) {
-                        /*
-                         * remote peer tries to send ack for something
-                         * we did not send yet, cannot have this
-                         */
-                        return -1;
-                }
+        if (!msg_sequence_cmp(ack, ctx->tx_ack))
+                return 0;
 
-                if ((mask & 1) == 0) {
-                        /*
-                         * first bit corresponds to current ack
-                         * sequence, it is always set
-                         */
-                        return -1;
-                }
+        if (msg_sequence_cmp(ack, ctx->tx_sent)) {
+                /*
+                 * remote peer tries to send ack for something
+                 * we did not send yet, cannot have this
+                 */
+                return -1;
+        }
 
-                for (u16 i = ack->ack;; i--) {
-                        if (mask & 1) {
-                                struct msg_tx_entry *msg = tx_get(ctx, i);
-                                if (msg->status == MSG_TX_SENT) {
-                                        msg->status = MSG_TX_ACKED;
-                                        discovered += 1;
-                                }
+        if ((mask & 1) == 0) {
+                /*
+                 * first bit corresponds to current ack
+                 * sequence, it is always set
+                 */
+                return -1;
+        }
+
+        for (u16 i = ack;; i--) {
+                if (mask & 1) {
+                        struct msg_tx_entry *msg = tx_get(ctx, i);
+                        if (msg->status == MSG_TX_SENT) {
+                                msg->status = MSG_TX_ACKED;
+                                discovered += 1;
                         }
-
-                        if (i == ctx->tx_ack)
-                                break;
-
-                        mask >>= 1;
                 }
+
+                if (i == ctx->tx_ack)
+                        break;
+
+                mask >>= 1;
         }
 
         return discovered;
@@ -1805,18 +1832,20 @@ static void noise_keypair_del(struct noise_keypair *pair)
 static inline void noise_chacha20_nonce(const u64 n,
                                         u8 out[CHACHA20POLY1305_NONCE])
 {
+        const u64le tmp = u64le_set(n);
+
         out[0] = 0;
         out[1] = 0;
         out[2] = 0;
         out[3] = 0;
-        out[4] = (u8) (n);
-        out[5] = (u8) (n >> 8);
-        out[6] = (u8) (n >> 16);
-        out[7] = (u8) (n >> 24);
-        out[8] = (u8) (n >> 32);
-        out[9] = (u8) (n >> 40);
-        out[10] = (u8) (n >> 48);
-        out[11] = (u8) (n >> 56);
+        out[4] = (u8) (tmp.val);
+        out[5] = (u8) (tmp.val >> 8);
+        out[6] = (u8) (tmp.val >> 16);
+        out[7] = (u8) (tmp.val >> 24);
+        out[8] = (u8) (tmp.val >> 32);
+        out[9] = (u8) (tmp.val >> 40);
+        out[10] = (u8) (tmp.val >> 48);
+        out[11] = (u8) (tmp.val >> 56);
 }
 
 
@@ -2159,7 +2188,7 @@ struct nmp_response {
 
 struct nmp_transport {
         struct nmp_header type_pad_id;
-        u64 counter;
+        u64le counter;
         u8 data[];
 };
 
@@ -2505,7 +2534,7 @@ static i32 session_transp_send(struct nmp_instance *nmp, struct nmp_session *ctx
         const u32 pkt_len = amt + sizeof(struct nmp_transport) + NOISE_AEAD_MAC;
 
         pkt->type_pad_id = header_init(type, ctx->session_id);
-        pkt->counter = ctx->noise_cnt_send;
+        pkt->counter = u64le_set(ctx->noise_cnt_send);
 
         if (noise_encrypt(ctx->noise_key_send, ctx->noise_cnt_send,
                           pkt, sizeof(struct nmp_transport),
@@ -2534,7 +2563,7 @@ static i32 session_transp_recv(struct nmp_session *ctx,
         const struct nmp_transport *header = (const struct nmp_transport *) packet;
         u8 *ciphertext = packet + sizeof(struct nmp_transport);
         u8 *mac = ciphertext + payload_len;
-        const u64 counter_remote = header->counter;
+        const u64 counter_remote = u64le_get(header->counter);
         const i32 block_index = noise_counter_validate(ctx->noise_cnt_block,
                                                        ctx->noise_cnt_recv,
                                                        counter_remote);
@@ -3441,13 +3470,15 @@ static i32 event_net(struct nmp_instance *nmp,
 
 static i32 nmp_teardown(struct nmp_instance *nmp)
 {
+        ior_teardown(&nmp->io);
         ht_teardown(&nmp->sessions, session_destroy);
 
+        if (nmp->local_tx != -1)
+                close(nmp->local_tx);
 
         blake2b_free(&nmp->hash);
         blake2b_hmac_free(&nmp->hmac);
         chacha20poly1305_free(&nmp->cipher);
-
 
         mem_zero(nmp, sizeof(struct nmp_instance));
         mem_free(nmp);
@@ -3492,6 +3523,10 @@ static i32 new_ior(struct nmp_instance *nmp, struct nmp_conf *conf)
 
         if (bind(udp, &conf->addr.sa, sizeof(union nmp_sa)))
                 return NMP_ERR_BIND;
+
+        socklen_t sa_len = sizeof(union nmp_sa);
+        if (getsockname(udp, &conf->addr.sa, &sa_len))
+                return NMP_ERR_GETSOCKNAME;
 
         int sp[2] = {0};
         if (socketpair(AF_UNIX, SOCK_DGRAM, 0, sp))
@@ -3899,7 +3934,7 @@ static i32 run_process_batch(struct nmp_instance *nmp,
                 case IOR_CQE_TIMER:
                         timer_ctx = ior_cqe_data(cqe);
                         res = timer_ctx ? event_timer(nmp, timer_ctx)
-                                  : ior_timer_set(&nmp->io, &nmp->its, NULL);
+                                        : ior_timer_set(&nmp->io, &nmp->its, NULL);
                         break;
 
                 default:
