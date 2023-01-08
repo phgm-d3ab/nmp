@@ -599,6 +599,9 @@ static i32 ior_udp_pbuf_get(struct ior *ctx, const ior_cqe *cqe,
         if ((cqe->flags & IORING_CQE_F_MORE) == 0)
                 return ior_udp_recv(ctx);
 
+        if ((cqe->flags & IORING_CQE_F_BUFFER) == 0)
+                return 1;
+
         out->bid = cqe->flags >> IORING_CQE_BUFFER_SHIFT;
         out->pbuf = &ctx->udp_ring_base[out->bid];
 
@@ -680,6 +683,9 @@ static i32 ior_socpair_pbuf_get(struct ior *ctx, const ior_cqe *cqe,
         if ((cqe->flags & IORING_CQE_F_MORE) == 0)
                 return ior_socpair_recv(ctx);
 
+        if ((cqe->flags & IORING_CQE_F_BUFFER) == 0)
+                return 1;
+
         out->bid = cqe->flags >> IORING_CQE_BUFFER_SHIFT;
         out->pbuf = &ctx->sp_ring_base[out->bid];
         out->data = out->pbuf;
@@ -752,11 +758,17 @@ static i32 ior_wait_cqe(struct ior *ctx)
 static inline u32 ior_cqe_kind(const struct ior *ctx,
                                const ior_cqe *cqe)
 {
-        if (cqe->flags & IORING_CQE_F_BUFFER)
-                return (io_uring_cqe_get_data(cqe) == ctx) ?
-                       IOR_CQE_SP : IOR_CQE_UDP;
+        void *data = io_uring_cqe_get_data(cqe);
+        if (data == NULL)
+                return IOR_CQE_UDP;
 
-        return cqe->res ? IOR_CQE_ERR : IOR_CQE_TIMER;
+        if (data == ctx)
+                return IOR_CQE_SP;
+
+        if (cqe->res == 0)
+                return IOR_CQE_TIMER;
+
+        return IOR_CQE_ERR;
 }
 
 
@@ -1994,7 +2006,7 @@ static i32 noise_split(struct noise_handshake *state,
 
 static u32 noise_state_init(struct noise_handshake *state)
 {
-        /* these state normally have values set already, so: */
+        /* these states normally have values set already, so: */
         return noise_mix_hash(state, state->rs, NOISE_DHLEN);
 }
 
