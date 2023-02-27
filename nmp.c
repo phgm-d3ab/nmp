@@ -79,13 +79,13 @@ struct siphash_ctx {
 };
 
 
-static i32 siphash_init(struct siphash_ctx *ctx,
-                        u8 key[SIPHASH_KEY])
+static bool siphash_init(struct siphash_ctx *ctx,
+                         u8 key[SIPHASH_KEY])
 {
         ctx->evp_mac = EVP_MAC_fetch(
                 NULL, "siphash", "provider=default");
         if (ctx->evp_mac == NULL)
-                return -1;
+                return 1;
 
         u32 c_rounds = SIPHASH_C;
         u32 d_rounds = SIPHASH_D;
@@ -116,9 +116,9 @@ static i32 siphash_init(struct siphash_ctx *ctx,
 }
 
 
-static i32 siphash_hash(struct siphash_ctx ctx,
-                        const void *data, const u32 data_len,
-                        u8 hash[SIPHASH_LEN])
+static bool siphash_hash(struct siphash_ctx ctx,
+                         const void *data, const u32 data_len,
+                         u8 hash[SIPHASH_LEN])
 {
         if (EVP_MAC_init(ctx.evp_ctx, NULL, 0, NULL) != 1)
                 return 1;
@@ -152,7 +152,7 @@ struct blake2b_ctx {
 };
 
 
-static i32 blake2b_init(struct blake2b_ctx *ctx)
+static bool blake2b_init(struct blake2b_ctx *ctx)
 {
         ctx->evp_md = EVP_blake2b512();
         if (ctx->evp_md == NULL)
@@ -162,21 +162,21 @@ static i32 blake2b_init(struct blake2b_ctx *ctx)
 }
 
 
-static i32 blake2b_reset(struct blake2b_ctx ctx)
+static bool blake2b_reset(struct blake2b_ctx ctx)
 {
         return (EVP_DigestInit_ex2(ctx.evp_ctx, ctx.evp_md, NULL) != 1);
 }
 
 
-static i32 blake2b_update(struct blake2b_ctx ctx,
-                          const void *data, const u32 data_len)
+static bool blake2b_update(struct blake2b_ctx ctx,
+                           const void *data, const u32 data_len)
 {
         return (EVP_DigestUpdate(ctx.evp_ctx, data, data_len) != 1);
 }
 
 
-static i32 blake2b_final(struct blake2b_ctx ctx,
-                         u8 out[BLAKE2B_HASHLEN])
+static bool blake2b_final(struct blake2b_ctx ctx,
+                          u8 out[BLAKE2B_HASHLEN])
 {
         u32 outlen = BLAKE2B_HASHLEN;
         return (EVP_DigestFinal_ex(ctx.evp_ctx,
@@ -197,7 +197,7 @@ struct blake2b_hmac_ctx {
 };
 
 
-static i32 blake2b_hmac_init(struct blake2b_hmac_ctx *ctx)
+static bool blake2b_hmac_init(struct blake2b_hmac_ctx *ctx)
 {
         ctx->evp_mac = EVP_MAC_fetch(NULL, "hmac", "provider=default");
         if (ctx->evp_mac == NULL)
@@ -221,17 +221,17 @@ static i32 blake2b_hmac_init(struct blake2b_hmac_ctx *ctx)
         if (EVP_MAC_CTX_set_params(ctx->evp_ctx, params) != 1) {
                 EVP_MAC_CTX_free(ctx->evp_ctx);
                 EVP_MAC_free(ctx->evp_mac);
-                return -1;
+                return 1;
         }
 
         return 0;
 }
 
 
-static i32 blake2b_hmac_hash(struct blake2b_hmac_ctx *ctx,
-                             const u8 key[BLAKE2B_HASHLEN],
-                             const void *data, const u32 datalen,
-                             u8 out[BLAKE2B_HASHLEN])
+static bool blake2b_hmac_hash(struct blake2b_hmac_ctx *ctx,
+                              const u8 key[BLAKE2B_HASHLEN],
+                              const void *data, const u32 datalen,
+                              u8 out[BLAKE2B_HASHLEN])
 {
         if (EVP_MAC_init(ctx->evp_ctx, key, BLAKE2B_HASHLEN, NULL) != 1)
                 return 1;
@@ -265,8 +265,8 @@ struct chacha20poly1305_ctx {
 };
 
 
-static i32 chacha20poly1305_init(struct chacha20poly1305_ctx *ctx,
-                                 const u8 key[CHACHA20POLY1305_KEYLEN])
+static bool chacha20poly1305_init(struct chacha20poly1305_ctx *ctx,
+                                  const u8 key[CHACHA20POLY1305_KEYLEN])
 {
         ctx->evp_ctx = EVP_CIPHER_CTX_new();
         if (ctx->evp_ctx == NULL)
@@ -277,19 +277,19 @@ static i32 chacha20poly1305_init(struct chacha20poly1305_ctx *ctx,
 }
 
 
-static i32 chacha20poly1305_set_key(struct chacha20poly1305_ctx *ctx,
-                                    const u8 key[CHACHA20POLY1305_KEYLEN])
+static bool chacha20poly1305_set_key(struct chacha20poly1305_ctx *ctx,
+                                     const u8 key[CHACHA20POLY1305_KEYLEN])
 {
         return (EVP_CipherInit_ex2(ctx->evp_ctx, NULL,
                                    key, NULL, -1, NULL) != 1);
 }
 
 
-static i32 chacha20poly1305_encrypt(struct chacha20poly1305_ctx ctx,
-                                    const u8 nonce[CHACHA20POLY1305_NONCE],
-                                    const void *aad, const u32 aad_len,
-                                    const void *plaintext, const u32 plainlen,
-                                    u8 *ciphertext, u8 mac[CHACHA20POLY1305_TAGLEN])
+static bool chacha20poly1305_encrypt(struct chacha20poly1305_ctx ctx,
+                                     const u8 nonce[CHACHA20POLY1305_NONCE],
+                                     const void *aad, const u32 aad_len,
+                                     const void *plaintext, const u32 plainlen,
+                                     u8 *ciphertext, u8 mac[CHACHA20POLY1305_TAGLEN])
 {
         i32 outlen = 0;
 
@@ -360,8 +360,8 @@ struct x448_public {
 };
 
 
-static i32 x448_public_init(struct x448_public *ctx,
-                            const u8 raw[X448_KEYLEN])
+static bool x448_public_init(struct x448_public *ctx,
+                             const u8 raw[X448_KEYLEN])
 {
         return (ctx->key = EVP_PKEY_new_raw_public_key(
                 EVP_PKEY_X448, NULL, raw, X448_KEYLEN)) == NULL;
@@ -380,20 +380,20 @@ struct x448_private {
 };
 
 
-static u32 x448_private_init(struct x448_private *ctx,
-                             const u8 key[X448_KEYLEN])
+static bool x448_private_init(struct x448_private *ctx,
+                              const u8 key[X448_KEYLEN])
 {
         ctx->key = EVP_PKEY_new_raw_private_key(
                 EVP_PKEY_X448, NULL, key, X448_KEYLEN);
         if (ctx->key == NULL)
                 return 1;
 
-        return (ctx->dh = EVP_PKEY_CTX_new(ctx->key, NULL)) == NULL;
+        return ((ctx->dh = EVP_PKEY_CTX_new(ctx->key, NULL)) == NULL);
 }
 
 
-static u32 x448_private_derive_pub(const struct x448_private *ctx,
-                                   u8 pub[X448_KEYLEN])
+static bool x448_private_derive_pub(const struct x448_private *ctx,
+                                    u8 pub[X448_KEYLEN])
 {
         u64 keylen = X448_KEYLEN;
         return (EVP_PKEY_get_raw_public_key(ctx->key, pub, &keylen) != 1);
@@ -511,8 +511,9 @@ struct ior_pbuf_out {
 };
 
 
-static i32 ior_pbuf_setup(struct ior *ctx, struct ior_pbuf *cfg)
+static bool ior_pbuf_setup(struct ior *ctx, struct ior_pbuf *cfg)
 {
+        i32 res = 0;
         cfg->buf_size = (sizeof(struct io_uring_buf) + cfg->item_size)
                         * cfg->items_amt;
 
@@ -530,10 +531,11 @@ static i32 ior_pbuf_setup(struct ior *ctx, struct ior_pbuf *cfg)
                 .bgid = cfg->bgid,
         };
 
-        i32 res = io_uring_register_buf_ring(&ctx->ring, &reg, 0);
+        res = io_uring_register_buf_ring(&ctx->ring, &reg, 0);
         if (res) {
+                errno = -res;
                 munmap(cfg->ring, cfg->buf_size);
-                return res;
+                return 1;
         }
 
         u8 *base = (u8 *) (cfg->ring) + (sizeof(struct io_uring_buf) * cfg->items_amt);
@@ -557,7 +559,7 @@ struct ior_udp_pbuf {
 };
 
 
-static i32 ior_udp_setup(struct ior *ctx, const int udp_soc)
+static bool ior_udp_setup(struct ior *ctx, const int udp_soc)
 {
         struct ior_pbuf cfg = {0};
 
@@ -578,7 +580,7 @@ static i32 ior_udp_setup(struct ior *ctx, const int udp_soc)
 }
 
 
-static i32 ior_udp_recv(struct ior *ctx)
+static bool ior_udp_recv(struct ior *ctx)
 {
         ior_sqe *sqe = ior_sqe_get(ctx);
         if (sqe == NULL)
@@ -593,8 +595,8 @@ static i32 ior_udp_recv(struct ior *ctx)
 }
 
 
-static i32 ior_udp_pbuf_get(struct ior *ctx, const ior_cqe *cqe,
-                            struct ior_pbuf_out *out)
+static bool ior_udp_pbuf_get(struct ior *ctx, const ior_cqe *cqe,
+                             struct ior_pbuf_out *out)
 {
         if ((cqe->flags & IORING_CQE_F_MORE) == 0)
                 return ior_udp_recv(ctx);
@@ -642,7 +644,7 @@ struct ior_spair_pbuf {
 };
 
 
-static i32 ior_socpair_setup(struct ior *ctx, const int recv_soc)
+static bool ior_socpair_setup(struct ior *ctx, const int recv_soc)
 {
         struct ior_pbuf cfg = {0};
 
@@ -662,7 +664,7 @@ static i32 ior_socpair_setup(struct ior *ctx, const int recv_soc)
 }
 
 
-static i32 ior_socpair_recv(struct ior *ctx)
+static bool ior_socpair_recv(struct ior *ctx)
 {
         ior_sqe *sqe = ior_sqe_get(ctx);
         if (sqe == NULL)
@@ -677,8 +679,8 @@ static i32 ior_socpair_recv(struct ior *ctx)
 }
 
 
-static i32 ior_socpair_pbuf_get(struct ior *ctx, const ior_cqe *cqe,
-                                struct ior_pbuf_out *out)
+static bool ior_socpair_pbuf_get(struct ior *ctx, const ior_cqe *cqe,
+                                 struct ior_pbuf_out *out)
 {
         if ((cqe->flags & IORING_CQE_F_MORE) == 0)
                 return ior_socpair_recv(ctx);
@@ -704,8 +706,8 @@ static void ior_socpair_buf_reuse(struct ior *ctx,
 }
 
 
-static i32 ior_setup(struct ior *ctx,
-                     const int udp_soc, const int recv_soc)
+static bool ior_setup(struct ior *ctx,
+                      const int udp_soc, const int recv_soc)
 {
         i32 res = 0;
         struct io_uring_params params = {0};
@@ -717,27 +719,22 @@ static i32 ior_setup(struct ior *ctx,
 
         res = io_uring_queue_init_params(
                 IOR_SQ, &ctx->ring, &params);
-        if (res)
-                goto out_fail;
-
-        res = ior_udp_setup(ctx, udp_soc);
-        if (res)
-                goto out_fail;
-
-        res = ior_socpair_setup(ctx, recv_soc);
-        if (res)
-                goto out_fail;
-
-        return 0;
-        out_fail:
-        {
+        if (res) {
                 errno = -res;
                 return 1;
-        };
+        }
+
+        if (ior_udp_setup(ctx, udp_soc))
+                return 1;
+
+        if (ior_socpair_setup(ctx, recv_soc))
+                return 1;
+
+        return 0;
 }
 
 
-static i32 ior_wait_cqe(struct ior *ctx)
+static bool ior_wait_cqe(struct ior *ctx)
 {
         const i32 res = io_uring_submit_and_wait(&ctx->ring, 1);
         if (res < 0) {
@@ -827,8 +824,8 @@ static void *ior_udp_prep_send(struct ior_udp_send_buf *buf,
 }
 
 
-static i32 ior_udp_send(struct ior *ctx, void *ref,
-                        struct ior_udp_send_buf *buf, const u32 data_len)
+static bool ior_udp_send(struct ior *ctx, void *ref,
+                         struct ior_udp_send_buf *buf, const u32 data_len)
 {
         ior_sqe *sqe = ior_sqe_get(ctx);
         if (sqe == NULL)
@@ -857,7 +854,7 @@ struct ior_timespec {
  *  expired timer is not considered an error, so we link this
  *  to nop so that this posts zero to cq instead of ETIME
  */
-static i32 ior_timer_set(struct ior *ctx, struct ior_timespec *t, void *ref)
+static bool ior_timer_set(struct ior *ctx, struct ior_timespec *t, void *ref)
 {
         ior_sqe *sqe = ior_sqe_get(ctx);
         if (sqe == NULL)
@@ -879,7 +876,7 @@ static i32 ior_timer_set(struct ior *ctx, struct ior_timespec *t, void *ref)
 }
 
 
-static i32 ior_timer_upd(struct ior *ctx, struct ior_timespec *t, void *ref)
+static bool ior_timer_upd(struct ior *ctx, struct ior_timespec *t, void *ref)
 {
         ior_sqe *sqe = ior_sqe_get(ctx);
         if (sqe == NULL)
@@ -891,7 +888,7 @@ static i32 ior_timer_upd(struct ior *ctx, struct ior_timespec *t, void *ref)
 }
 
 
-static i32 ior_timer_del(struct ior *ctx, void *ref)
+static bool ior_timer_del(struct ior *ctx, void *ref)
 {
         ior_sqe *sqe = ior_sqe_get(ctx);
         if (sqe == NULL)
@@ -1229,7 +1226,7 @@ struct msg_rx_entry {
 };
 
 
-struct msg_routines {
+struct msg_cbs {
         void (*data)(const u8 *, u32, void *);
         void (*data_noack)(const u8 *, u32, void *);
         void (*ack)(u64, void *);
@@ -1261,7 +1258,7 @@ static_assert_pow2(MSG_RXQUEUE);
 
 
 /* compare sequence numbers, cover for wraparound */
-static inline i32 msg_sequence_cmp(const u16 a, const u16 b)
+static inline bool msg_sequence_cmp(const u16 a, const u16 b)
 {
         return ((a <= b) ? ((b - a) > 0xff) : ((a - b) < 0xff));
 }
@@ -1323,8 +1320,8 @@ static void msg_context_wipe(struct msg_state *ctx)
 }
 
 
-static u32 msg_queue(struct msg_state *ctx, const u8 *msg, const u16 len,
-                     const u8 flags, const u64 user_data)
+static bool msg_queue(struct msg_state *ctx, const u8 *msg, const u16 len,
+                      const u8 flags, const u64 user_data)
 {
         assert(msg);
 
@@ -1430,7 +1427,7 @@ static i32 msg_assemble_retry(const struct msg_state *ctx,
 }
 
 
-static u32 msg_assemble_noack(struct msg_header *header,
+static i32 msg_assemble_noack(struct msg_header *header,
                               const u8 *payload, const u16 len)
 {
         header->sequence = u16le_set(0);
@@ -1442,7 +1439,7 @@ static u32 msg_assemble_noack(struct msg_header *header,
 }
 
 
-static i32 msg_read(const struct msg_routines *cb, struct msg_state *ctx,
+static i32 msg_read(const struct msg_cbs *cb, struct msg_state *ctx,
                     const u8 *payload, const u32 len)
 {
         u32 iterator = 0;
@@ -1509,7 +1506,7 @@ static i32 msg_read(const struct msg_routines *cb, struct msg_state *ctx,
 /*
  *  this can be called only if there are new messages to deliver
  */
-static void msg_deliver_data(const struct msg_routines *cb,
+static void msg_deliver_data(const struct msg_cbs *cb,
                              struct msg_state *ctx)
 {
         for (u16 n = ctx->rx_delivered + 1;; n++) {
@@ -1611,7 +1608,7 @@ static i32 msg_ack_read(struct msg_state *ctx,
 }
 
 
-static i32 msg_deliver_ack(const struct msg_routines *cb,
+static i32 msg_deliver_ack(const struct msg_cbs *cb,
                            struct msg_state *ctx)
 {
         i32 counter = 0;
@@ -1719,24 +1716,24 @@ struct noise_handshake {
 };
 
 
-static i32 noise_hash(struct blake2b_ctx hash,
-                      const void *data, const u32 data_len,
-                      u8 output[NOISE_HASHLEN])
+static bool noise_hash(struct blake2b_ctx hash,
+                       const void *data, const u32 data_len,
+                       u8 output[NOISE_HASHLEN])
 {
         if (blake2b_reset(hash))
-                return -1;
+                return 1;
 
         if (blake2b_update(hash, data, data_len))
-                return -1;
+                return 1;
 
         return blake2b_final(hash, output);
 }
 
 
-static inline i32 noise_hmac_hash(struct blake2b_hmac_ctx *hmac,
-                                  const u8 key[NOISE_HASHLEN],
-                                  const void *data, const u32 data_len,
-                                  u8 output[NOISE_HASHLEN])
+static inline bool noise_hmac_hash(struct blake2b_hmac_ctx *hmac,
+                                   const u8 key[NOISE_HASHLEN],
+                                   const void *data, const u32 data_len,
+                                   u8 output[NOISE_HASHLEN])
 {
         return blake2b_hmac_hash(hmac, key, data, data_len, output);
 }
@@ -1746,11 +1743,11 @@ static inline i32 noise_hmac_hash(struct blake2b_hmac_ctx *hmac,
  * noise spec has third output, but it is not used
  * in this handshake pattern so not included here
  */
-static u32 noise_hkdf(struct blake2b_hmac_ctx *hmac,
-                      const u8 ck[NOISE_HASHLEN],
-                      const u8 *ikm, const u32 ikm_len,
-                      u8 output1[NOISE_HASHLEN],
-                      u8 output2[NOISE_HASHLEN])
+static bool noise_hkdf(struct blake2b_hmac_ctx *hmac,
+                       const u8 ck[NOISE_HASHLEN],
+                       const u8 *ikm, const u32 ikm_len,
+                       u8 output1[NOISE_HASHLEN],
+                       u8 output2[NOISE_HASHLEN])
 {
         const u8 byte_1 = 0x01;
         u8 temp_key[NOISE_HASHLEN] = {0};
@@ -1809,8 +1806,8 @@ static inline i32 noise_dh(struct blake2b_ctx hash,
 }
 
 
-static inline u32 noise_keypair_initialize(struct noise_keypair *pair,
-                                           const u8 private[NOISE_DHLEN])
+static inline bool noise_keypair_initialize(struct noise_keypair *pair,
+                                            const u8 private[NOISE_DHLEN])
 {
         if (x448_private_init(&pair->priv, private))
                 return 1;
@@ -1819,9 +1816,9 @@ static inline u32 noise_keypair_initialize(struct noise_keypair *pair,
 }
 
 
-static u32 noise_keypair_generate(struct blake2b_ctx h,
-                                  struct rnd_pool *rnd,
-                                  struct noise_keypair *pair)
+static bool noise_keypair_generate(struct blake2b_ctx h,
+                                   struct rnd_pool *rnd,
+                                   struct noise_keypair *pair)
 {
         u8 buf[NOISE_HASHLEN] = {0};
         if (rnd_get_bytes(rnd, &buf, sizeof(buf)))
@@ -1861,10 +1858,10 @@ static inline void noise_chacha20_nonce(const u64 n,
 }
 
 
-static inline u32 noise_encrypt(struct chacha20poly1305_ctx cipher, const u64 n,
-                                const void *ad, const u32 ad_len,
-                                const void *plaintext, const u32 plaintext_len,
-                                u8 *ciphertext, u8 *mac)
+static inline bool noise_encrypt(struct chacha20poly1305_ctx cipher, const u64 n,
+                                 const void *ad, const u32 ad_len,
+                                 const void *plaintext, const u32 plaintext_len,
+                                 u8 *ciphertext, u8 *mac)
 {
         u8 nonce[CHACHA20POLY1305_NONCE];
         noise_chacha20_nonce(n, nonce);
@@ -1875,7 +1872,7 @@ static inline u32 noise_encrypt(struct chacha20poly1305_ctx cipher, const u64 n,
 }
 
 
-static inline u32 noise_decrypt(struct chacha20poly1305_ctx cipher, const u64 n,
+static inline i32 noise_decrypt(struct chacha20poly1305_ctx cipher, const u64 n,
                                 const void *ad, const u32 ad_len,
                                 const u8 *ciphertext, const u32 ciphertext_len,
                                 u8 *mac, void *plaintext)
@@ -1889,8 +1886,8 @@ static inline u32 noise_decrypt(struct chacha20poly1305_ctx cipher, const u64 n,
 }
 
 
-static u32 noise_mix_key(struct noise_handshake *state,
-                         const u8 *ikm, const u32 ikm_len)
+static bool noise_mix_key(struct noise_handshake *state,
+                          const u8 *ikm, const u32 ikm_len)
 {
         u8 temp_k[NOISE_HASHLEN] = {0};
 
@@ -1906,8 +1903,8 @@ static u32 noise_mix_key(struct noise_handshake *state,
 }
 
 
-static u32 noise_mix_hash(struct noise_handshake *state,
-                          const void *data, const u32 data_len)
+static bool noise_mix_hash(struct noise_handshake *state,
+                           const void *data, const u32 data_len)
 {
         if (blake2b_reset(state->hash))
                 return 1;
@@ -1925,25 +1922,28 @@ static u32 noise_mix_hash(struct noise_handshake *state,
 /*
  * serves as a mix_key(dh(..))
  */
-static u32 noise_mix_key_dh(struct noise_handshake *state,
+static i32 noise_mix_key_dh(struct noise_handshake *state,
                             struct noise_keypair *pair,
                             const u8 *public_key)
 {
         u8 temp_dh[NOISE_DHLEN] = {0};
-        if (noise_dh(state->hash, pair,
-                     public_key, temp_dh))
-                return 1;
+        i32 res = 0;
+
+        res = noise_dh(state->hash, pair,
+                       public_key, temp_dh);
+        if (res)
+                return res;
 
         if (noise_mix_key(state, temp_dh, NOISE_DHLEN))
-                return 1;
+                return -1;
 
         return 0;
 }
 
 
-static u32 noise_encrypt_and_hash(struct noise_handshake *state,
-                                  const void *plaintext, const u32 plaintext_len,
-                                  u8 *ciphertext, u8 *mac)
+static bool noise_encrypt_and_hash(struct noise_handshake *state,
+                                   const void *plaintext, const u32 plaintext_len,
+                                   u8 *ciphertext, u8 *mac)
 {
         if (chacha20poly1305_set_key(&state->aead, state->cipher_k))
                 return 1;
@@ -1962,29 +1962,31 @@ static u32 noise_encrypt_and_hash(struct noise_handshake *state,
 }
 
 
-static u32 noise_decrypt_and_hash(struct noise_handshake *state,
+static i32 noise_decrypt_and_hash(struct noise_handshake *state,
                                   const u8 *ciphertext, const u32 ciphertext_len,
                                   u8 *mac, void *plaintext)
 {
+        i32 res = 0;
         if (chacha20poly1305_set_key(&state->aead, state->cipher_k))
-                return 1;
+                return -1;
 
-        if (noise_decrypt(state->aead, state->cipher_n,
-                          state->symmetric_h, NOISE_HASHLEN,
-                          ciphertext, ciphertext_len,
-                          mac, plaintext))
-                return 1;
+        res = noise_decrypt(state->aead, state->cipher_n,
+                            state->symmetric_h, NOISE_HASHLEN,
+                            ciphertext, ciphertext_len,
+                            mac, plaintext);
+        if (res)
+                return res;
 
         if (noise_mix_hash(state, ciphertext, ciphertext_len))
-                return 1;
+                return -1;
 
         return 0;
 }
 
 
-static i32 noise_split(struct noise_handshake *state,
-                       struct chacha20poly1305_ctx *c1,
-                       struct chacha20poly1305_ctx *c2)
+static bool noise_split(struct noise_handshake *state,
+                        struct chacha20poly1305_ctx *c1,
+                        struct chacha20poly1305_ctx *c2)
 {
         u8 temp_k1[NOISE_HASHLEN] = {0};
         u8 temp_k2[NOISE_HASHLEN] = {0};
@@ -2004,7 +2006,7 @@ static i32 noise_split(struct noise_handshake *state,
 }
 
 
-static u32 noise_state_init(struct noise_handshake *state)
+static bool noise_state_init(struct noise_handshake *state)
 {
         /* these states normally have values set already, so: */
         return noise_mix_hash(state, state->rs, NOISE_DHLEN);
@@ -2017,63 +2019,73 @@ static void noise_state_del(struct noise_handshake *state)
 }
 
 
-static u32 noise_initiator_write(struct noise_handshake *state,
+static i32 noise_initiator_write(struct noise_handshake *state,
                                  struct noise_initiator *initiator,
                                  const void *ad, const u32 ad_len,
                                  const u8 *payload)
 {
+        int res = 0;
+
         if (noise_mix_hash(state, ad, ad_len))
-                return 1;
+                return -1;
 
         /* e */
         if (noise_keypair_generate(state->hash, state->rnd, &state->e))
-                return 1;
+                return -1;
 
         mem_copy(initiator->ephemeral, state->e.pub_raw, NOISE_DHLEN);
         if (noise_mix_hash(state, state->e.pub_raw, NOISE_DHLEN))
-                return 1;
+                return -1;
 
         /* es */
-        if (noise_mix_key_dh(state, &state->e, state->rs))
-                return 1;
+        res = noise_mix_key_dh(state, &state->e, state->rs);
+        if (res)
+                return res;
 
         /* s */
         if (noise_encrypt_and_hash(state,
                                    state->s->pub_raw, NOISE_DHLEN,
                                    initiator->encrypted_static,
                                    initiator->mac1))
-                return 1;
+                return -1;
 
         /* ss */
-        if (noise_mix_key_dh(state, state->s, state->rs))
-                return 1;
+        res = noise_mix_key_dh(state, state->s, state->rs);
+        if (res)
+                return res;
 
         /* payload: encrypt_and_hash(payload) */
-        return noise_encrypt_and_hash(state,
-                                      payload, NOISE_HANDSHAKE_PAYLOAD,
-                                      initiator->encrypted_payload, initiator->mac2);
+        if (noise_encrypt_and_hash(state, payload, NOISE_HANDSHAKE_PAYLOAD,
+                                   initiator->encrypted_payload, initiator->mac2))
+                return -1;
+
+        return 0;
 }
 
 
-static u32 noise_responder_read(struct noise_handshake *state,
+static i32 noise_responder_read(struct noise_handshake *state,
                                 struct noise_responder *responder,
                                 const void *ad, const u32 ad_len,
                                 u8 *payload)
 {
+        i32 res = 0;
+
         if (noise_mix_hash(state, ad, ad_len))
-                return 1;
+                return -1;
 
         /* e */
         if (noise_mix_hash(state, responder->ephemeral, NOISE_DHLEN))
-                return 1;
+                return -1;
 
         /* ee */
-        if (noise_mix_key_dh(state, &state->e, responder->ephemeral))
-                return 1;
+        res = noise_mix_key_dh(state, &state->e, responder->ephemeral);
+        if (res)
+                return res;
 
         /* se */
-        if (noise_mix_key_dh(state, state->s, responder->ephemeral))
-                return 1;
+        res = noise_mix_key_dh(state, state->s, responder->ephemeral);
+        if (res)
+                return res;
 
         /* payload */
         return noise_decrypt_and_hash(state, responder->encrypted_payload,
@@ -2082,32 +2094,37 @@ static u32 noise_responder_read(struct noise_handshake *state,
 }
 
 
-static u32 noise_initiator_read(struct noise_handshake *state,
+static i32 noise_initiator_read(struct noise_handshake *state,
                                 struct noise_initiator *initiator,
                                 const void *ad, const u32 ad_len,
                                 u8 *payload)
 {
+        int res = 0;
+
         if (noise_mix_hash(state, ad, ad_len))
-                return 1;
+                return -1;
 
         /* e */
         mem_copy(state->re, initiator->ephemeral, NOISE_DHLEN);
         if (noise_mix_hash(state, state->re, NOISE_DHLEN))
-                return 1;
+                return -1;
 
         /* es */
-        if (noise_mix_key_dh(state, state->s, state->re))
-                return 1;
+        res = noise_mix_key_dh(state, state->s, state->re);
+        if (res)
+                return res;
 
         /* s */
-        if (noise_decrypt_and_hash(state, initiator->encrypted_static,
-                                   NOISE_DHLEN, initiator->mac1, state->rs))
-                return 1;
+        res = noise_decrypt_and_hash(state, initiator->encrypted_static,
+                                     NOISE_DHLEN, initiator->mac1, state->rs);
+        if (res)
+                return res;
 
 
         /* ss */
-        if (noise_mix_key_dh(state, state->s, state->rs))
-                return 1;
+        res = noise_mix_key_dh(state, state->s, state->rs);
+        if (res)
+                return res;
 
         /* payload */
         return noise_decrypt_and_hash(state, initiator->encrypted_payload,
@@ -2116,34 +2133,40 @@ static u32 noise_initiator_read(struct noise_handshake *state,
 }
 
 
-static u32 noise_responder_write(struct noise_handshake *state,
+static i32 noise_responder_write(struct noise_handshake *state,
                                  struct noise_responder *responder,
                                  const void *ad, const u32 ad_len,
                                  const void *payload)
 {
+        i32 res = 0;
+
         if (noise_mix_hash(state, ad, ad_len))
-                return 1;
+                return -1;
 
         /* e */
         if (noise_keypair_generate(state->hash, state->rnd, &state->e))
-                return 1;
+                return -1;
 
         mem_copy(responder->ephemeral, state->e.pub_raw, NOISE_DHLEN);
         if (noise_mix_hash(state, state->e.pub_raw, NOISE_DHLEN))
-                return 1;
+                return -1;
 
         /* ee */
-        if (noise_mix_key_dh(state, &state->e, state->re))
-                return 1;
+        res = noise_mix_key_dh(state, &state->e, state->re);
+        if (res)
+                return res;
 
         /* se */
-        if (noise_mix_key_dh(state, &state->e, state->rs))
-                return 1;
+        res = noise_mix_key_dh(state, &state->e, state->rs);
+        if (res)
+                return res;
 
         /* payload */
-        return noise_encrypt_and_hash(state,
-                                      payload, NOISE_HANDSHAKE_PAYLOAD,
-                                      responder->encrypted_payload, responder->mac);
+        if (noise_encrypt_and_hash(state, payload, NOISE_HANDSHAKE_PAYLOAD,
+                                   responder->encrypted_payload, responder->mac))
+                return -1;
+
+        return 0;
 }
 
 
@@ -2210,7 +2233,7 @@ struct nmp_transport {
  */
 enum {
 #if defined(NMP_DEBUG_TIMERS)
-        SESSION_REQUEST_TTL = 0xffffffff,
+        SESSION_REQUEST_TTL = INT32_MAX,
 #else
         SESSION_REQUEST_TTL = 15000,
 #endif
@@ -2349,7 +2372,7 @@ struct nmp_instance {
         int (*status_cb)(const enum nmp_status, const union nmp_cb_status *, void *);
         void (*stats_cb)(const u64, const u64, void *);
 
-        struct msg_routines transport_cbs;
+        struct msg_cbs transport_cbs;
         struct noise_keypair static_keys;
         struct rnd_pool rnd;
 
@@ -2395,7 +2418,7 @@ static i32 session_new(struct nmp_rq_connect *rq,
                       (rq->transport_payload + sizeof(struct msg_header)) :
                       (NMP_PAYLOAD_MAX + sizeof(struct msg_header));
         if (xfer_pl < 496 || xfer_pl > MSG_MAX_PAYLOAD)
-                return NMP_ERR_INVAL;
+                return -NMP_ERR_INVAL;
 
         struct chacha20poly1305_ctx c1 = {0};
         struct chacha20poly1305_ctx c2 = {0};
@@ -2404,14 +2427,14 @@ static i32 session_new(struct nmp_rq_connect *rq,
 
         if (chacha20poly1305_init(&c1, NULL)
             || chacha20poly1305_init(&c2, NULL)) {
-                res = NMP_ERR_CRYPTO;
+                res = -NMP_ERR_CRYPTO;
                 goto out_fail;
         }
 
         ini = mem_alloc(sizeof(struct nmp_session_init));
         ctx = mem_alloc(sizeof(struct nmp_session));
         if (ini == NULL || ctx == NULL) {
-                res = NMP_ERR_MALLOC;
+                res = -NMP_ERR_MALLOC;
                 goto out_fail;
         }
 
@@ -2552,10 +2575,10 @@ static i32 session_transp_send(struct nmp_instance *nmp, struct nmp_session *ctx
                           pkt, sizeof(struct nmp_transport),
                           payload, amt,
                           pkt->data, pkt->data + amt))
-                return NMP_ERR_CRYPTO;
+                return -NMP_ERR_CRYPTO;
 
         if (ior_udp_send(&nmp->io, ctx, buf, pkt_len))
-                return NMP_ERR_IORING;
+                return -NMP_ERR_IORING;
 
         ctx->noise_cnt_send += 1;
         ctx->stat_tx += pkt_len;
@@ -2567,6 +2590,7 @@ static i32 session_transp_recv(struct nmp_session *ctx,
                                u8 *packet, const u32 packet_len,
                                u8 plaintext[MSG_MAX_PAYLOAD])
 {
+        i32 res = 0;
         const i32 payload_len = (i32) (packet_len
                                        - sizeof(struct nmp_transport) - NOISE_AEAD_MAC);
         if (payload_len < 0 || payload_len > MSG_MAX_PAYLOAD)
@@ -2582,11 +2606,19 @@ static i32 session_transp_recv(struct nmp_session *ctx,
         if (block_index < 0)
                 return -1;
 
-        if (noise_decrypt(ctx->noise_key_recv, counter_remote,
-                          header, sizeof(struct nmp_transport),
-                          ciphertext, payload_len,
-                          mac, plaintext))
+        res = noise_decrypt(ctx->noise_key_recv, counter_remote,
+                            header, sizeof(struct nmp_transport),
+                            ciphertext, payload_len,
+                            mac, plaintext);
+        switch (res) {
+        case 1:
                 return -1;
+        case -1:
+                return -NMP_ERR_CRYPTO;
+        case 0:
+        default:
+                break;
+        }
 
         /* only after successful decryption */
         if (counter_remote > ctx->noise_cnt_recv) {
@@ -2602,8 +2634,9 @@ static i32 session_transp_recv(struct nmp_session *ctx,
                 ctx->noise_cnt_recv = counter_remote;
         }
 
-        ctx->noise_cnt_block[block_index] |= (1 << (u32) (counter_remote & 31));
+        ctx->noise_cnt_block[block_index] |= (1u << (u32) (counter_remote & 31u));
         ctx->stat_rx += packet_len;
+
         return payload_len;
 }
 
@@ -2619,26 +2652,26 @@ static i32 session_request(struct nmp_instance *nmp, struct nmp_session *ctx)
 
         ini->payload.timestamp = time_get();
         if (ini->payload.timestamp == 0)
-                return NMP_ERR_TIME;
-
+                return -NMP_ERR_TIME;
 
         request->header = header_init(NMP_REQUEST, ctx->session_id);
         if (noise_initiator_write(&ini->handshake,
                                   &request->initiator,
                                   request, sizeof(struct nmp_header),
                                   (u8 *) &ini->payload))
-                return NMP_ERR_CRYPTO;
+                return -NMP_ERR_CRYPTO;
 
         if (ior_udp_send(&nmp->io, ctx, buf,
                          sizeof(struct nmp_request)))
-                return NMP_ERR_IORING;
+                return -NMP_ERR_IORING;
 
 
         ctx->state = SESSION_STATUS_RESPONSE;
         ctx->stat_tx += sizeof(struct nmp_request);
         ctx->its = ior_ts(SESSION_RETRY_INTERVAL, 0);
 
-        return ior_timer_set(&nmp->io, &ctx->its, ctx) ? NMP_ERR_IORING : 0;
+        return ior_timer_set(&nmp->io, &ctx->its, ctx) ?
+               -NMP_ERR_IORING : 0;
 }
 
 
@@ -2656,11 +2689,11 @@ static i32 session_response(struct nmp_instance *nmp,
                                   &response->responder,
                                   &response->header, sizeof(struct nmp_header),
                                   (u8 *) payload))
-                return NMP_ERR_CRYPTO;
+                return -NMP_ERR_CRYPTO;
 
         if (ior_udp_send(&nmp->io, ctx,
                          &ini->send_buf, sizeof(struct nmp_response)))
-                return NMP_ERR_IORING;
+                return -NMP_ERR_IORING;
 
 
         ctx->state = SESSION_STATUS_CONFIRM;
@@ -2669,7 +2702,7 @@ static i32 session_response(struct nmp_instance *nmp,
         ctx->its = ior_ts(ctx->timer_keepalive, 0);
 
         return ior_timer_set(&nmp->io, &ctx->its, ctx) ?
-               NMP_ERR_IORING : 0;
+               -NMP_ERR_IORING : 0;
 }
 
 
@@ -2698,9 +2731,8 @@ static i32 session_data(struct nmp_instance *nmp, struct nmp_session *ctx)
                         ctx->state = SESSION_STATUS_ACKWAIT;
                         ctx->its = rto_table[ctx->timer_retries];
 
-                        res = ior_timer_upd(&nmp->io, &ctx->its, ctx);
-                        if (res)
-                                return NMP_ERR_IORING;
+                        if (ior_timer_upd(&nmp->io, &ctx->its, ctx))
+                                return -NMP_ERR_IORING;
                 }
 
                 res = session_transp_send(nmp, ctx, payload, amt, NMP_DATA);
@@ -2861,13 +2893,13 @@ static i32 local_connect(struct nmp_instance *nmp,
         }
 
         if (noise_state_init(&ctx->initiation->handshake)) {
-                res = NMP_ERR_CRYPTO;
+                res = -NMP_ERR_CRYPTO;
                 goto out_fail;
         }
 
         if (ht_insert(&nmp->sessions,
                       ctx->session_id, ctx)) {
-                res = NMP_ERR_CRYPTO;
+                res = -NMP_ERR_CRYPTO;
                 goto out_fail;
         }
 
@@ -2904,10 +2936,9 @@ static i32 local_process_rq(struct nmp_instance *nmp,
         case NMP_OP_CONNECT:
                 return local_connect(nmp, ctx, request);
         case NMP_OP_TERMINATE:
-                return NMP_STATUS_LAST;
-
+                return -NMP_STATUS_LAST;
         default:
-                return -1;
+                return -NMP_ERR_INVAL;
         }
 }
 
@@ -2920,15 +2951,15 @@ static i32 event_local(struct nmp_instance *nmp,
 
         const i32 err = ior_cqe_err(cqe);
         if (err) {
-                if (err != ENOBUFS)
-                        return NMP_ERR_IORING;
+                if (err != ENOBUFS || ior_socpair_recv(&nmp->io))
+                        return -NMP_ERR_IORING;
 
-                return ior_socpair_recv(&nmp->io);
+                return 0;
         }
 
         struct ior_pbuf_out pb = {0};
         if (ior_socpair_pbuf_get(&nmp->io, cqe, &pb))
-                return NMP_ERR_IORING;
+                return -NMP_ERR_IORING;
 
         struct nmp_rq *queue = pb.data;
         const u32 queue_len = (pb.data_len / sizeof(struct nmp_rq));
@@ -3000,7 +3031,7 @@ static i32 event_timer(struct nmp_instance *nmp,
 
                 if (ior_udp_send(&nmp->io, ctx,
                                  &ctx->initiation->send_buf, sizeof(struct nmp_request)))
-                        return NMP_ERR_IORING;
+                        return -NMP_ERR_IORING;
 
                 ctx->stat_tx += sizeof(struct nmp_request);
                 break;
@@ -3018,7 +3049,7 @@ static i32 event_timer(struct nmp_instance *nmp,
                 return 0;
 
         default:
-                return NMP_ERR_IORING;
+                return -NMP_ERR_IORING;
         }
 
 
@@ -3027,7 +3058,7 @@ static i32 event_timer(struct nmp_instance *nmp,
 
         /* reset to a previous value */
         return ior_timer_set(&nmp->io, &ctx->its, ctx) ?
-               NMP_ERR_IORING : 0;
+               -NMP_ERR_IORING : 0;
 }
 
 
@@ -3054,7 +3085,7 @@ static i32 net_data_first(struct nmp_instance *nmp, struct nmp_session *ctx)
         /* there could be a custom interval set, update needed */
         ctx->its = ior_ts(ctx->timer_keepalive, 0);
         return ior_timer_upd(&nmp->io, &ctx->its, ctx) ?
-               NMP_ERR_IORING : 0;
+               -NMP_ERR_IORING : 0;
 }
 
 
@@ -3143,7 +3174,7 @@ static i32 net_request_existing(struct nmp_instance *nmp,
 
                 if (ior_udp_send(&nmp->io, ctx,
                                  &ctx->initiation->send_buf, sizeof(struct nmp_response)))
-                        return NMP_ERR_IORING;
+                        return -NMP_ERR_IORING;
 
                 ctx->response_retries += 1;
         }
@@ -3165,7 +3196,7 @@ static i32 net_request_accept(struct nmp_instance *nmp,
 
         res = session_new(connect, handshake, &ctx);
         if (res) {
-                if (res == NMP_ERR_INVAL && nmp->status_cb) {
+                if (res == -NMP_ERR_INVAL && nmp->status_cb) {
                         const union nmp_cb_status err =
                                 {.session_id = connect->id};
 
@@ -3180,7 +3211,7 @@ static i32 net_request_accept(struct nmp_instance *nmp,
                 goto out_fail;
 
         if (ht_insert(&nmp->sessions, connect->id, ctx)) {
-                res = NMP_ERR_CRYPTO;
+                res = -NMP_ERR_CRYPTO;
                 goto out_fail;
         }
 
@@ -3191,7 +3222,7 @@ static i32 net_request_accept(struct nmp_instance *nmp,
         if (noise_split(&ini->handshake,
                         &ctx->noise_key_recv,
                         &ctx->noise_key_send)) {
-                res = NMP_ERR_CRYPTO;
+                res = -NMP_ERR_CRYPTO;
                 goto out_fail;
         }
 
@@ -3227,11 +3258,11 @@ static i32 net_request_respond(struct nmp_instance *nmp,
         if (noise_responder_write(handshake, &response->responder,
                                   &response->header, sizeof(struct nmp_header),
                                   &response_payload))
-                return NMP_ERR_CRYPTO;
+                return -NMP_ERR_CRYPTO;
 
         return ior_udp_send(&nmp->io, nmp, /* ! */
                             buf, sizeof(struct nmp_response)) ?
-               NMP_ERR_IORING : 0;
+               -NMP_ERR_IORING : 0;
 }
 
 
@@ -3286,7 +3317,7 @@ static i32 net_request(struct nmp_instance *nmp,
 }
 
 
-static u32 net_response_accept(struct nmp_instance *nmp,
+static i32 net_response_accept(struct nmp_instance *nmp,
                                struct nmp_session *ctx)
 {
         struct nmp_session_init *initiation = ctx->initiation;
@@ -3320,7 +3351,7 @@ static u32 net_response_accept(struct nmp_instance *nmp,
 }
 
 
-static u32 net_response(struct nmp_instance *nmp,
+static i32 net_response(struct nmp_instance *nmp,
                         const u32 session_id, const union nmp_sa *addr,
                         struct nmp_response *response, const u32 amt)
 {
@@ -3345,24 +3376,25 @@ static u32 net_response(struct nmp_instance *nmp,
                         return 0;
         }
 
+        i32 res = 0;
         struct nmp_init_payload reply_pl = {0};
         struct nmp_session_init *ini = ctx->initiation;
 
-        if (noise_responder_read(&ini->handshake,
-                                 &response->responder,
-                                 &response->header, sizeof(struct nmp_header),
-                                 (u8 *) &reply_pl))
-                return 0;
+        res = noise_responder_read(&ini->handshake,
+                                   &response->responder,
+                                   &response->header, sizeof(struct nmp_header),
+                                   (u8 *) &reply_pl);
+        if (res)
+                return (res == -1) ? -NMP_ERR_CRYPTO : 0;
 
-        const i32 res = nmp->status_cb(NMP_SESSION_RESPONSE,
-                                       (const union nmp_cb_status *) reply_pl.data,
-                                       ctx->context_ptr);
+        res = nmp->status_cb(NMP_SESSION_RESPONSE,
+                             (const union nmp_cb_status *) reply_pl.data,
+                             ctx->context_ptr);
         switch ((enum nmp_status) res) {
         case NMP_CMD_ACCEPT:
                 return net_response_accept(nmp, ctx);
 
         case NMP_CMD_DROP:
-                /* no point having this session anymore */
                 ht_remove(&nmp->sessions, ctx->session_id);
                 ctx->state = SESSION_STATUS_NONE;
                 return 0;
@@ -3450,15 +3482,15 @@ static i32 event_net(struct nmp_instance *nmp,
 {
         const i32 err = ior_cqe_err(cqe);
         if (err) {
-                if (err != ENOBUFS)
-                        return NMP_ERR_IORING;
+                if (err != ENOBUFS || ior_udp_recv(&nmp->io))
+                        return -NMP_ERR_IORING;
 
-                return ior_udp_recv(&nmp->io);
+                return 0;
         }
 
         struct ior_pbuf_out pb = {0};
         if (ior_udp_pbuf_get(&nmp->io, cqe, &pb))
-                return NMP_ERR_IORING;
+                return -NMP_ERR_IORING;
 
         if (pb.data == NULL)
                 goto out_reuse;
@@ -3495,7 +3527,7 @@ static i32 nmp_teardown(struct nmp_instance *nmp)
         mem_zero(nmp, sizeof(struct nmp_instance));
         mem_free(nmp);
 
-        return NMP_STATUS_LAST;
+        return -NMP_STATUS_LAST;
 }
 
 
@@ -3504,7 +3536,7 @@ static i32 new_base(struct nmp_instance *nmp, struct nmp_conf *conf)
         const sa_family_t sa_family = conf->addr.sa.sa_family ?
                                       conf->addr.sa.sa_family : AF_INET;
         if (sa_family != AF_INET && sa_family != AF_INET6)
-                return NMP_ERR_INVAL;
+                return -NMP_ERR_INVAL;
 
         nmp->sa_family = sa_family;
 
@@ -3519,9 +3551,10 @@ static i32 new_base(struct nmp_instance *nmp, struct nmp_conf *conf)
 
         u8 ht_key[SIPHASH_KEY] = {0};
         if (rnd_get(ht_key, SIPHASH_KEY))
-                return NMP_ERR_RND;
+                return -NMP_ERR_RND;
 
-        return (ht_init(&nmp->sessions, ht_key)) ? NMP_ERR_CRYPTO : 0;
+        return (ht_init(&nmp->sessions, ht_key)) ?
+               -NMP_ERR_CRYPTO : 0;
 }
 
 
@@ -3531,21 +3564,21 @@ static i32 new_ior(struct nmp_instance *nmp, struct nmp_conf *conf)
 
         const int udp = socket(nmp->sa_family, SOCK_DGRAM, 0);
         if (udp == -1)
-                return NMP_ERR_SOCKET;
+                return -NMP_ERR_SOCKET;
 
         if (bind(udp, &conf->addr.sa, sizeof(union nmp_sa)))
-                return NMP_ERR_BIND;
+                return -NMP_ERR_BIND;
 
         socklen_t sa_len = sizeof(union nmp_sa);
         if (getsockname(udp, &conf->addr.sa, &sa_len))
-                return NMP_ERR_GETSOCKNAME;
+                return -NMP_ERR_GETSOCKNAME;
 
         int sp[2] = {0};
         if (socketpair(AF_UNIX, SOCK_DGRAM, 0, sp))
-                return NMP_ERR_SOCKPAIR;
+                return -NMP_ERR_SOCKPAIR;
 
         if (ior_setup(&nmp->io, udp, sp[0]))
-                return NMP_ERR_IORING;
+                return -NMP_ERR_IORING;
 
         nmp->local_tx = sp[1];
         return 0;
@@ -3555,19 +3588,19 @@ static i32 new_ior(struct nmp_instance *nmp, struct nmp_conf *conf)
 static i32 new_crypto(struct nmp_instance *nmp, struct nmp_conf *conf)
 {
         if (rnd_reset_pool(&nmp->rnd))
-                return NMP_ERR_RND;
+                return -NMP_ERR_RND;
 
         if (blake2b_init(&nmp->hash))
-                return NMP_ERR_CRYPTO;
+                return -NMP_ERR_CRYPTO;
 
         if (blake2b_hmac_init(&nmp->hmac))
-                return NMP_ERR_CRYPTO;
+                return -NMP_ERR_CRYPTO;
 
         if (chacha20poly1305_init(&nmp->cipher, NULL))
-                return NMP_ERR_CRYPTO;
+                return -NMP_ERR_CRYPTO;
 
         if (noise_keypair_initialize(&nmp->static_keys, conf->key))
-                return NMP_ERR_CRYPTO;
+                return -NMP_ERR_CRYPTO;
 
 
         nmp->noise_empty.rnd = &nmp->rnd;
@@ -3586,7 +3619,7 @@ static i32 new_crypto(struct nmp_instance *nmp, struct nmp_conf *conf)
                  nmp->static_keys.pub_raw, NOISE_DHLEN);
 
         if (noise_state_init(&nmp->noise_precomp))
-                return NMP_ERR_CRYPTO;
+                return -NMP_ERR_CRYPTO;
 
 
         mem_copy(conf->pubkey, nmp->static_keys.pub_raw, NOISE_DHLEN);
@@ -3602,7 +3635,7 @@ struct nmp_instance *nmp_new(struct nmp_conf *conf)
 
         nmp_t *tmp = mem_alloc(sizeof(struct nmp_instance));
         if (tmp == NULL) {
-                conf->err = NMP_ERR_MALLOC;
+                conf->err = -NMP_ERR_MALLOC;
                 return NULL;
         }
 
@@ -3639,7 +3672,7 @@ struct nmp_instance *nmp_new(struct nmp_conf *conf)
         out_fail:
         {
                 nmp_teardown(tmp);
-                conf->err = res;
+                conf->err = -res;
                 return NULL;
         }
 }
@@ -3653,11 +3686,11 @@ static i32 submit_connect(struct nmp_instance *nmp, struct nmp_rq *rq)
         i32 res = 0;
 
         if (connect->addr.sa.sa_family != nmp->sa_family)
-                return NMP_ERR_INVAL;
+                return -NMP_ERR_INVAL;
 
         connect->id = rnd_get32();
         if (connect->id == 0)
-                return NMP_ERR_RND;
+                return -NMP_ERR_RND;
 
         res = session_new(connect, &nmp->noise_empty, &session);
         if (res)
@@ -3675,7 +3708,7 @@ static i32 submit_connect(struct nmp_instance *nmp, struct nmp_rq *rq)
 }
 
 
-static u32 submit_validate_send(const struct nmp_rq *send)
+static bool submit_validate_send(const struct nmp_rq *send)
 {
         if (send->session_id == 0)
                 return 1;
@@ -3694,11 +3727,11 @@ static i32 submit_send_noack(struct nmp_instance *nmp, struct nmp_rq *rq)
 {
         UNUSED(nmp);
         if (submit_validate_send(rq))
-                return NMP_ERR_INVAL;
+                return -NMP_ERR_INVAL;
 
         struct msg_header *buf = mem_alloc(MSG_MAX_PAYLOAD);
         if (buf == NULL)
-                return NMP_ERR_MALLOC;
+                return -NMP_ERR_MALLOC;
 
         rq->len = msg_assemble_noack(buf, rq->entry_arg, rq->len);
         rq->entry_arg = buf;
@@ -3711,7 +3744,7 @@ static i32 submit_send(struct nmp_instance *nmp, struct nmp_rq *rq)
 {
         UNUSED(nmp);
         if (submit_validate_send(rq))
-                return NMP_ERR_INVAL;
+                return -NMP_ERR_INVAL;
 
         if (rq->msg_flags & NMP_F_MSG_NOACK)
                 return submit_send_noack(nmp, rq);
@@ -3719,7 +3752,7 @@ static i32 submit_send(struct nmp_instance *nmp, struct nmp_rq *rq)
         if ((rq->msg_flags & NMP_F_MSG_NOALLOC) == 0) {
                 u8 *buf = mem_alloc(MSG_MAX_PAYLOAD);
                 if (buf == NULL)
-                        return NMP_ERR_MALLOC;
+                        return -NMP_ERR_MALLOC;
 
                 mem_copy(buf, rq->entry_arg, rq->len);
                 rq->entry_arg = buf;
@@ -3784,13 +3817,13 @@ int nmp_submit(struct nmp_instance *nmp,
                         break;
 
                 default:
-                        err = NMP_ERR_INVAL;
+                        err = -NMP_ERR_INVAL;
                         break;
                 }
 
                 if (err) {
                         submit_cleanup(rqs, i);
-                        return err;
+                        return -err;
                 }
         }
 
@@ -3842,7 +3875,7 @@ static i32 run_events_deliver(struct nmp_instance *nmp,
                         ctx->its = ior_ts(ctx->timer_keepalive, 0);
 
                         if (ior_timer_upd(&nmp->io, &ctx->its, ctx))
-                                return NMP_ERR_IORING;
+                                return -NMP_ERR_IORING;
 
                         break;
 
@@ -3879,7 +3912,7 @@ static i32 run_process_err(struct nmp_instance *nmp,
         struct nmp_session *ctx = ior_cqe_data(cqe);
         const i32 err = ior_cqe_err(cqe);
         if (err == 0)
-                return NMP_ERR_IORING;
+                return -NMP_ERR_IORING;
 
 
         switch (err) {
@@ -3887,7 +3920,8 @@ static i32 run_process_err(struct nmp_instance *nmp,
                 return 0;
 
         case ENOENT: /* timers */
-                return ior_timer_set(&nmp->io, &ctx->its, ctx);
+                return ior_timer_set(&nmp->io, &ctx->its, ctx) ?
+                       -NMP_ERR_IORING : 0;
 
         case EACCES: /* sendmsg */
         case EPERM:
@@ -3918,7 +3952,7 @@ static i32 run_process_err(struct nmp_instance *nmp,
                 break;
         }
 
-        return NMP_ERR_IORING;
+        return -NMP_ERR_IORING;
 }
 
 
@@ -3946,7 +3980,8 @@ static i32 run_process_batch(struct nmp_instance *nmp,
                 case IOR_CQE_TIMER:
                         timer_ctx = ior_cqe_data(cqe);
                         res = timer_ctx ? event_timer(nmp, timer_ctx)
-                                        : ior_timer_set(&nmp->io, &nmp->its, NULL);
+                                        : ior_timer_set(&nmp->io, &nmp->its, NULL) ?
+                                          -NMP_ERR_IORING : 0;
                         break;
 
                 default:
@@ -3955,7 +3990,7 @@ static i32 run_process_batch(struct nmp_instance *nmp,
                 }
 
                 if (res)
-                        return -res;
+                        return res;
 
                 if (ctx) {
                         queue[items] = ctx;
@@ -3990,13 +4025,13 @@ i32 nmp_run(struct nmp_instance *nmp, const u32 timeout)
                 for (i32 i = 0; i < queued; i++) {
                         res = run_events_deliver(nmp, events_queue[i]);
                         if (res)
-                                return res;
+                                return -res;
                 }
         }
 
         res = -queued;
         if (res == NMP_STATUS_LAST)
-                return nmp_teardown(nmp);
+                return -nmp_teardown(nmp);
 
         assert(res > NMP_ERR_SEND);
         return res;
