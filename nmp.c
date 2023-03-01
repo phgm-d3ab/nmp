@@ -744,6 +744,7 @@ static bool ior_wait_cqe(struct ior *ctx)
                         return 0;
 
                 default:
+                        errno = -res;
                         return 1;
                 }
         }
@@ -2326,6 +2327,13 @@ struct nmp_session_init {
 };
 
 
+struct nmp_event {
+        i32 err;
+        struct nmp_session *ctx;
+        struct ior_pbuf_out buf;
+};
+
+
 struct nmp_session {
         enum session_status state;
         u32 session_id;
@@ -2943,36 +2951,34 @@ static i32 local_process_rq(struct nmp_instance *nmp,
 }
 
 
-static i32 event_local(struct nmp_instance *nmp,
-                       const struct io_uring_cqe *cqe,
-                       struct nmp_session **ctx_empty)
+static void event_local(struct nmp_instance *nmp,
+                        const ior_cqe *cqe,
+                        struct nmp_event *event)
 {
-        UNUSED(ctx_empty);
-
         const i32 err = ior_cqe_err(cqe);
         if (err) {
-                if (err != ENOBUFS || ior_socpair_recv(&nmp->io))
-                        return -NMP_ERR_IORING;
+                if (err != ENOBUFS || ior_socpair_recv(&nmp->io)) {
+                        event->err = -NMP_ERR_IORING;
+                }
 
-                return 0;
+                return;
         }
 
-        struct ior_pbuf_out pb = {0};
-        if (ior_socpair_pbuf_get(&nmp->io, cqe, &pb))
-                return -NMP_ERR_IORING;
+        if (ior_socpair_pbuf_get(&nmp->io, cqe, &event->buf)) {
+                event->err = -NMP_ERR_IORING;
+                return;
+        }
 
-        struct nmp_rq *queue = pb.data;
-        const u32 queue_len = (pb.data_len / sizeof(struct nmp_rq));
-        i32 result = 0;
+        struct nmp_rq *queue = event->buf.data;
+        const u32 queue_len = (event->buf.data_len / sizeof(struct nmp_rq));
 
         for (u32 i = 0; i < queue_len; i++) {
-                result = local_process_rq(nmp, &queue[i]);
-                if (result)
+                event->err = local_process_rq(nmp, &queue[i]);
+                if (event->err)
                         break;
         }
 
-        ior_socpair_buf_reuse(&nmp->io, pb.pbuf, pb.bid);
-        return result;
+        ior_socpair_buf_reuse(&nmp->io, event->buf.pbuf, event->buf.bid);
 }
 
 
@@ -2981,10 +2987,16 @@ static i32 event_local(struct nmp_instance *nmp,
 ///////////////////////////////
 
 
-static i32 event_timer(struct nmp_instance *nmp,
-                       struct nmp_session *ctx)
+static void event_timer(struct nmp_instance *nmp,
+                        const ior_cqe *cqe,
+                        struct nmp_event *event)
 {
-        i32 res = 0;
+        struct nmp_session *ctx = ior_cqe_data(cqe);
+        if (ctx == NULL) {
+                event->err = ior_timer_set(&nmp->io, &nmp->its, NULL) ?
+                             -NMP_ERR_IORING : 0;
+                return;
+        }
 
         /* session has been marked for deletion */
         if (ctx->state == SESSION_STATUS_NONE) {
@@ -2994,7 +3006,7 @@ static i32 event_timer(struct nmp_instance *nmp,
                  * so it does not accept any remaining events from sockets (/queues)
                  */
                 session_destroy(ctx);
-                return 0;
+                return;
         }
 
 
@@ -3006,23 +3018,23 @@ static i32 event_timer(struct nmp_instance *nmp,
 
                 session_drop(nmp, ctx, NMP_SESSION_DISCONNECTED, &latest);
                 session_destroy(ctx);
-                return 0;
+                return;
         }
 
         switch (ctx->state) {
         case SESSION_STATUS_WINDOW:
         case SESSION_STATUS_ACKWAIT:
                 ctx->its = rto_table[ctx->timer_retries];
-                res = session_data_retry(nmp, ctx);
-                if (res)
-                        return res;
+                event->err = session_data_retry(nmp, ctx);
+                if (event->err)
+                        return;
 
                 break;
 
         case SESSION_STATUS_ESTAB:
-                res = session_keepalive(nmp, ctx);
-                if (res)
-                        return res;
+                event->err = session_keepalive(nmp, ctx);
+                if (event->err)
+                        return;
 
                 break;
 
@@ -3030,8 +3042,11 @@ static i32 event_timer(struct nmp_instance *nmp,
                 assert(ctx->initiation);
 
                 if (ior_udp_send(&nmp->io, ctx,
-                                 &ctx->initiation->send_buf, sizeof(struct nmp_request)))
-                        return -NMP_ERR_IORING;
+                                 &ctx->initiation->send_buf,
+                                 sizeof(struct nmp_request))) {
+                        event->err = -NMP_ERR_IORING;
+                        return;
+                }
 
                 ctx->stat_tx += sizeof(struct nmp_request);
                 break;
@@ -3046,10 +3061,11 @@ static i32 event_timer(struct nmp_instance *nmp,
 
                 session_drop(nmp, ctx, NMP_SESSION_DISCONNECTED, NULL);
                 session_destroy(ctx);
-                return 0;
+                return;
 
         default:
-                return -NMP_ERR_IORING;
+                event->err = -NMP_ERR_IORING;
+                return;
         }
 
 
@@ -3057,8 +3073,8 @@ static i32 event_timer(struct nmp_instance *nmp,
                 nmp->stats_cb(ctx->stat_rx, ctx->stat_tx, ctx->context_ptr);
 
         /* reset to a previous value */
-        return ior_timer_set(&nmp->io, &ctx->its, ctx) ?
-               -NMP_ERR_IORING : 0;
+        event->err = ior_timer_set(&nmp->io, &ctx->its, ctx) ?
+                     -NMP_ERR_IORING : 0;
 }
 
 
@@ -3280,18 +3296,20 @@ static i32 net_request(struct nmp_instance *nmp,
         if (ctx)
                 return net_request_existing(nmp, ctx, request, addr);
 
+        i32 res = 0;
         struct noise_handshake handshake = nmp->noise_precomp;
         struct nmp_rq_connect request_cb = {0};
         struct nmp_init_payload request_payload = {0};
 
-        if (noise_initiator_read(&handshake, &request->initiator,
-                                 &request->header, sizeof(struct nmp_header),
-                                 (u8 *) &request_payload))
-                return 0;
+        res = noise_initiator_read(&handshake, &request->initiator,
+                                   &request->header, sizeof(struct nmp_header),
+                                   (u8 *) &request_payload);
+        if (res)
+                return (res == 1) ? 0 : -NMP_ERR_CRYPTO;
 
         const u64 timestamp = time_get();
         if (timestamp == 0)
-                return -1;
+                return -NMP_ERR_TIME;
 
         if (timestamp >= request_payload.timestamp + SESSION_REQUEST_TTL)
                 return 0;
@@ -3320,13 +3338,14 @@ static i32 net_request(struct nmp_instance *nmp,
 static i32 net_response_accept(struct nmp_instance *nmp,
                                struct nmp_session *ctx)
 {
+        i32 res = 0;
         struct nmp_session_init *initiation = ctx->initiation;
 
         ctx->noise_cnt_send = 0;
         ctx->noise_cnt_recv = 0;
         if (noise_split(&initiation->handshake,
                         &ctx->noise_key_send, &ctx->noise_key_recv))
-                return 1;
+                return -NMP_ERR_CRYPTO;
 
         noise_state_del(&initiation->handshake);
 
@@ -3336,18 +3355,21 @@ static i32 net_response_accept(struct nmp_instance *nmp,
         ctx->stat_rx += sizeof(struct nmp_response);
 
         ctx->state = SESSION_STATUS_ESTAB;
-        if (session_data(nmp, ctx))
-                return 1;
+        res = session_data(nmp, ctx);
+        if (res)
+                return res;
 
         if (ctx->state == SESSION_STATUS_ACKWAIT)
                 return 0;
 
         /* no data => keepalive */
-        if (session_keepalive(nmp, ctx))
-                return 1;
+        res = session_keepalive(nmp, ctx);
+        if (res)
+                return res;
 
         ctx->its = ior_ts(ctx->timer_keepalive, 0);
-        return ior_timer_upd(&nmp->io, &ctx->its, ctx);
+        return ior_timer_upd(&nmp->io, &ctx->its, ctx) ?
+               -NMP_ERR_IORING : 0;
 }
 
 
@@ -3405,62 +3427,68 @@ static i32 net_response(struct nmp_instance *nmp,
 }
 
 
-static struct nmp_session *net_collect(struct nmp_instance *nmp,
-                                       struct nmp_header *packet, const u32 packet_len,
-                                       const union nmp_sa *addr)
+static void net_collect(struct nmp_instance *nmp,
+                        struct nmp_event *event)
 {
-        const struct nmp_header header = *packet;
+        const struct nmp_header header = *((struct nmp_header *) event->buf.data);
         if (header.type & 0xfc /* 0b11111100 */
             || (header.pad[0] | header.pad[1] | header.pad[2]))
-                return NULL;
+                return;
 
         if (header.session_id == 0)
-                return NULL;
+                return;
 
         if (header.type < NMP_DATA) {
                 switch (header.type) {
                 case NMP_REQUEST:
-                        net_request(nmp, header.session_id, addr,
-                                    (struct nmp_request *) packet, packet_len);
-                        return NULL;
+                        event->err = net_request(nmp, header.session_id, event->buf.name,
+                                                 event->buf.data, event->buf.data_len);
+                        return;
 
                 case NMP_RESPONSE:
-                        net_response(nmp, header.session_id, addr,
-                                     (struct nmp_response *) packet, packet_len);
-                        return NULL;
+                        event->err = net_response(nmp, header.session_id, event->buf.name,
+                                                  event->buf.data, event->buf.data_len);
+                        return;
                 }
         }
 
         struct nmp_session *ctx = ht_lookup(&nmp->sessions, header.session_id);
         if (ctx == NULL)
-                return NULL;
+                return;
 
         if (ctx->flags & NMP_F_ADDR_VERIFY) {
-                if (mem_cmp(&ctx->addr.sa, &addr->sa, sizeof(union nmp_sa)) != 0)
-                        return NULL;
+                if (mem_cmp(&ctx->addr.sa, event->buf.name, sizeof(union nmp_sa)) != 0)
+                        return;
         }
 
-        if (packet_len % 16)
-                return NULL;
+        if (event->buf.data_len % 16)
+                return;
 
         u8 payload[MSG_MAX_PAYLOAD];
-        const i32 payload_len = session_transp_recv(ctx, (u8 *) packet, packet_len,
-                                                    payload);
-        if (payload_len < 0)
-                return NULL;
+        i32 payload_msgs = 0;
+        i32 payload_len = session_transp_recv(ctx, event->buf.data,
+                                                    event->buf.data_len, payload);
+        if (payload_len < 0) {
+                if (payload_len != -1)
+                        event->err = payload_len;
 
+                return;
+        }
 
         switch (header.type) {
         case NMP_DATA:
-                if (net_data(nmp, ctx, payload, payload_len) <= 0)
-                        return NULL;
+                payload_msgs = net_data(nmp, ctx, payload, payload_len);
+                if (payload_msgs <= 0) {
+                        event->err = payload_msgs;
+                        return;
+                }
 
                 ctx->events |= SESSION_EVENT_DATA;
                 break;
 
         case NMP_ACK:
                 if (!net_ack(nmp, ctx, payload, payload_len))
-                        return NULL;
+                        return;
 
                 ctx->events |= SESSION_EVENT_ACK;
                 break;
@@ -3469,40 +3497,32 @@ static struct nmp_session *net_collect(struct nmp_instance *nmp,
         /* if there are new events && not queued yet */
         if (ctx->events && !(ctx->events & SESSION_EVENT_QUEUED)) {
                 ctx->events |= SESSION_EVENT_QUEUED;
-                return ctx;
+                event->ctx = ctx;
         }
-
-        return NULL;
 }
 
 
-static i32 event_net(struct nmp_instance *nmp,
-                     const struct io_uring_cqe *cqe,
-                     struct nmp_session **ctx_ptr)
+static void event_net(struct nmp_instance *nmp,
+                      const ior_cqe *cqe,
+                      struct nmp_event *event)
 {
         const i32 err = ior_cqe_err(cqe);
         if (err) {
                 if (err != ENOBUFS || ior_udp_recv(&nmp->io))
-                        return -NMP_ERR_IORING;
+                        event->err = -NMP_ERR_IORING;
 
-                return 0;
+                return;
         }
 
-        struct ior_pbuf_out pb = {0};
-        if (ior_udp_pbuf_get(&nmp->io, cqe, &pb))
-                return -NMP_ERR_IORING;
-
-        if (pb.data == NULL)
-                goto out_reuse;
-
-        *ctx_ptr = net_collect(nmp, pb.data, pb.data_len, pb.name);
-
-
-        out_reuse:
-        {
-                ior_udp_pbuf_reuse(&nmp->io, pb.pbuf, pb.bid);
-                return 0;
+        if (ior_udp_pbuf_get(&nmp->io, cqe, &event->buf)) {
+                event->err = -NMP_ERR_IORING;
+                return;
         }
+
+        if (event->buf.data)
+                net_collect(nmp, event);
+
+        ior_udp_pbuf_reuse(&nmp->io, event->buf.pbuf, event->buf.bid);
 }
 
 
@@ -3959,45 +3979,43 @@ static i32 run_process_err(struct nmp_instance *nmp,
 static i32 run_process_batch(struct nmp_instance *nmp,
                              struct nmp_session **queue)
 {
-        struct nmp_session *ctx = NULL;
-        struct nmp_session *timer_ctx = NULL;
         ior_cqe *cqe = NULL;
         u32 head = 0;
         u32 cqes = 0;
         i32 items = 0;
-        i32 res = 0;
 
         ior_for_each_cqe(&nmp->io.ring, head, cqe) {
+                struct nmp_event event = {0};
+
                 switch (ior_cqe_kind(&nmp->io, cqe)) {
                 case IOR_CQE_UDP:
-                        res = event_net(nmp, cqe, &ctx);
+                        event_net(nmp, cqe, &event);
                         break;
 
                 case IOR_CQE_SP:
-                        res = event_local(nmp, cqe, &ctx);
+                        event_local(nmp, cqe, &event);
                         break;
 
                 case IOR_CQE_TIMER:
-                        timer_ctx = ior_cqe_data(cqe);
-                        res = timer_ctx ? event_timer(nmp, timer_ctx)
-                                        : ior_timer_set(&nmp->io, &nmp->its, NULL) ?
-                                          -NMP_ERR_IORING : 0;
+                        event_timer(nmp, cqe, &event);
                         break;
 
                 default:
-                        res = run_process_err(nmp, cqe);
+                        event.err = run_process_err(nmp, cqe);
                         break;
                 }
 
-                if (res)
-                        return res;
+                if (event.err)
+                        return event.err;
 
-                if (ctx) {
-                        queue[items] = ctx;
+                if (event.ctx) {
+                        queue[items] = event.ctx;
                         items += 1;
                 }
 
                 cqes += 1;
+                if (items == IOR_BATCH)
+                        break;
         }
 
         ior_cq_advance(&nmp->io, cqes);
@@ -4017,7 +4035,10 @@ i32 nmp_run(struct nmp_instance *nmp, const u32 timeout)
                         return NMP_ERR_IORING;
         }
 
-        while (ior_wait_cqe(&nmp->io) == 0) {
+        for (;;) {
+                if (ior_wait_cqe(&nmp->io))
+                        return NMP_ERR_IORING;
+
                 queued = run_process_batch(nmp, events_queue);
                 if (queued < 0)
                         break;
