@@ -126,7 +126,7 @@ static bool siphash_hash(struct siphash_ctx ctx,
         if (EVP_MAC_update(ctx.evp_ctx, data, data_len) != 1)
                 return 1;
 
-        return (EVP_MAC_final(ctx.evp_ctx, (u8 *) &hash,
+        return (EVP_MAC_final(ctx.evp_ctx, hash,
                               NULL, SIPHASH_LEN) != 1);
 }
 
@@ -480,7 +480,7 @@ static ior_sqe *ior_sqe_get(struct ior *ctx)
 {
         struct io_uring_sqe *sqe = io_uring_get_sqe(&ctx->ring);
         if (sqe == NULL) {
-                const int res = io_uring_submit(&ctx->ring);
+                const i32 res = io_uring_submit(&ctx->ring);
                 if (res < 0)
                         return NULL;
 
@@ -555,7 +555,7 @@ static bool ior_pbuf_setup(struct ior *ctx, struct ior_pbuf *cfg)
 
 
 struct ior_udp_pbuf {
-        u8 data[IOR_UDP_PBUFSIZE];
+        u8 _data[IOR_UDP_PBUFSIZE];
 };
 
 
@@ -640,7 +640,7 @@ static void ior_udp_pbuf_reuse(struct ior *ctx,
 
 
 struct ior_spair_pbuf {
-        u8 data[IOR_SOCPAIR_PBUFSIZE];
+        u8 _data[IOR_SOCPAIR_PBUFSIZE];
 };
 
 
@@ -1018,9 +1018,8 @@ struct ht_entry {
 
 
 struct hash_table {
-        struct siphash_ctx siphash;
         u32 items;
-
+        struct siphash_ctx siphash;
         struct ht_cache_entry cache[HT_CACHE];
         struct ht_entry entry[HT_RSIZE];
 };
@@ -1077,6 +1076,8 @@ static u32 ht_slot(struct hash_table *ht, const u64 hash, const u32 item)
                 ht->entry[index].status = HT_DELETED;
                 ht->entry[index].id = 0;
                 ht->entry[index].ptr = NULL;
+
+                index = index_swap;
         }
 
         return index;
@@ -1113,6 +1114,9 @@ static i32 ht_insert(struct hash_table *ht, const u32 id, void *ptr)
                         ht->items += 1;
                         return 0;
                 }
+
+                if (ht->entry[index].id == id)
+                        break;
         }
 
         return 1;
@@ -1121,6 +1125,8 @@ static i32 ht_insert(struct hash_table *ht, const u32 id, void *ptr)
 
 static void ht_remove(struct hash_table *ht, const u32 id)
 {
+        assert(ht->items > 0);
+
         const u64 hash = ht_hash(ht, id);
         const u32 natural_slot = (u32) hash & (HT_RSIZE - 1);
 
@@ -2025,7 +2031,7 @@ static i32 noise_initiator_write(struct noise_handshake *state,
                                  const void *ad, const u32 ad_len,
                                  const u8 *payload)
 {
-        int res = 0;
+        i32 res = 0;
 
         if (noise_mix_hash(state, ad, ad_len))
                 return -1;
@@ -2100,7 +2106,7 @@ static i32 noise_initiator_read(struct noise_handshake *state,
                                 const void *ad, const u32 ad_len,
                                 u8 *payload)
 {
-        int res = 0;
+        i32 res = 0;
 
         if (noise_mix_hash(state, ad, ad_len))
                 return -1;
@@ -2183,7 +2189,7 @@ static i32 noise_counter_validate(const u32 block[8],
 
         const i32 block_index = (i32) (remote / 32) & 7;
         if (remote <= local) {
-                if (block[block_index] & (1 << (remote & 31)))
+                if (block[block_index] & (1u << (remote & 31u)))
                         return -1;
         }
 
@@ -2310,7 +2316,7 @@ enum session_status {
 
 struct nmp_init_payload {
         u64 timestamp;
-        u8 reserved[24];
+        u8 _reserved[24];
         u8 data[NMP_INITIATION_PAYLOAD];
 };
 
@@ -2654,6 +2660,7 @@ static i32 session_request(struct nmp_instance *nmp, struct nmp_session *ctx)
         assert(ctx->state == SESSION_STATUS_NONE);
         assert(ctx->initiation);
 
+        i32 res = 0;
         struct nmp_session_init *ini = ctx->initiation;
         struct ior_udp_send_buf *buf = &ini->send_buf;
         struct nmp_request *request = ior_udp_prep_send(buf, &ctx->addr);
@@ -2663,11 +2670,11 @@ static i32 session_request(struct nmp_instance *nmp, struct nmp_session *ctx)
                 return -NMP_ERR_TIME;
 
         request->header = header_init(NMP_REQUEST, ctx->session_id);
-        if (noise_initiator_write(&ini->handshake,
-                                  &request->initiator,
-                                  request, sizeof(struct nmp_header),
-                                  (u8 *) &ini->payload))
-                return -NMP_ERR_CRYPTO;
+        res = noise_initiator_write(&ini->handshake, &request->initiator,
+                                    request, sizeof(struct nmp_header),
+                                    (u8 *) &ini->payload);
+        if (res)
+                return res;
 
         if (ior_udp_send(&nmp->io, ctx, buf,
                          sizeof(struct nmp_request)))
@@ -2689,15 +2696,16 @@ static i32 session_response(struct nmp_instance *nmp,
 {
         assert(ctx->state == SESSION_STATUS_NONE);
 
+        i32 res = 0;
         struct nmp_session_init *ini = ctx->initiation;
         struct nmp_response *response = ior_udp_prep_send(&ini->send_buf, &ctx->addr);
 
         response->header = header_init(NMP_RESPONSE, ctx->session_id);
-        if (noise_responder_write(&ini->handshake,
-                                  &response->responder,
-                                  &response->header, sizeof(struct nmp_header),
-                                  (u8 *) payload))
-                return -NMP_ERR_CRYPTO;
+        res = noise_responder_write(&ini->handshake, &response->responder,
+                                    &response->header, sizeof(struct nmp_header),
+                                    (u8 *) payload);
+        if (res)
+                return res;
 
         if (ior_udp_send(&nmp->io, ctx,
                          &ini->send_buf, sizeof(struct nmp_response)))
@@ -3467,7 +3475,7 @@ static void net_collect(struct nmp_instance *nmp,
         u8 payload[MSG_MAX_PAYLOAD];
         i32 payload_msgs = 0;
         i32 payload_len = session_transp_recv(ctx, event->buf.data,
-                                                    event->buf.data_len, payload);
+                                              event->buf.data_len, payload);
         if (payload_len < 0) {
                 if (payload_len != -1)
                         event->err = payload_len;
