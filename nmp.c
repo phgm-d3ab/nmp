@@ -987,14 +987,14 @@ static u32 rnd_get32(void)
  *  https://en.wikipedia.org/wiki/Open_addressing
  *  https://en.wikipedia.org/wiki/Lazy_deletion
  */
+#define HT_ERR ((void *) -1)
+
 enum {
-        HT_SIZE = NMP_SESSIONS_MAX, /* @nmp.h */
-        HT_RSIZE = (HT_SIZE * 2),
-        HT_NOT_FOUND = (HT_SIZE + 1),
-        HT_CACHE = (HT_SIZE / 4),
+        HT_SIZE = 128,
 };
 
-static_assert_pow2(HT_RSIZE);
+
+static_assert_pow2(HT_SIZE);
 
 
 enum ht_entry_status {
@@ -1004,164 +1004,225 @@ enum ht_entry_status {
 };
 
 
-struct ht_cache_entry {
-        u32 id;
-        u64 hash;
-};
-
-
 struct ht_entry {
         enum ht_entry_status status;
-        u32 id;
-        void *ptr;
+        u32 key;
+        void *val;
 };
 
 
 struct hash_table {
-        u32 items;
+        i32 items;
+        i32 capacity;
+        i32 deletions;
         struct siphash_ctx siphash;
-        struct ht_cache_entry cache[HT_CACHE];
-        struct ht_entry entry[HT_RSIZE];
+        struct ht_entry *entry;
 };
 
 
-static u64 ht_hash(struct hash_table *ht, const u32 key)
+static i32 ht_rebuild(struct hash_table *ht, const i32 cap_new)
 {
-        u64 hash = 0;
-        const u32 index = key & (HT_CACHE - 1);
+        const u32 arr_len = sizeof(struct ht_entry) * cap_new;
+        struct ht_entry *arr = mem_alloc(arr_len);
+        if (arr == NULL)
+                return -1;
 
-        if (ht->cache[index].id == key)
-                return ht->cache[index].hash;
+        mem_zero(arr, arr_len);
+        i32 items = 0;
 
-        /* fixme: this better have some better return than zero */
-        if (siphash_hash(ht->siphash, &key,
-                         sizeof(u32), (u8 *) &hash))
-                return 0;
+        for (i32 i = 0; i < ht->capacity; i++) {
+                struct ht_entry *entry = ht->entry + i;
+                if (entry->status != HT_OCCUPIED)
+                        continue;
 
-        ht->cache[index].id = key;
-        ht->cache[index].hash = hash;
+                u64 hash = 0;
+                if (siphash_hash(ht->siphash, &entry->key,
+                                 sizeof(u32), (u8 *) &hash)) {
+                        mem_free(arr);
+                        return -1;
+                }
 
-        return hash;
+                const u64 slot = (i32) hash & (cap_new - 1);
+                struct ht_entry *entry_new = NULL;
+
+                for (i32 j = 0; j < cap_new; j++) {
+                        entry_new = &arr[(slot + j) & (cap_new - 1)];
+                        if (entry_new->status)
+                                continue;
+
+                        *entry_new = (struct ht_entry) {
+                                .status = HT_OCCUPIED,
+                                .key = entry->key,
+                                .val = entry->val,
+                        };
+
+                        break;
+                }
+
+                items += 1;
+                if (items == ht->items)
+                        break;
+        }
+
+        mem_free(ht->entry);
+        ht->capacity = cap_new;
+        ht->deletions = 0;
+        ht->entry = arr;
+        return 0;
 }
 
 
-static u32 ht_slot(struct hash_table *ht, const u64 hash, const u32 item)
+static struct ht_entry *ht_slot(struct hash_table *ht,
+                                const u32 key, const u64 hash)
 {
-        const u32 natural_slot = (u32) hash & (HT_RSIZE - 1);
+        const i32 slot = (i32) hash & (ht->capacity - 1);
+        struct ht_entry *entry = NULL;
+        struct ht_entry *entry_swap = NULL;
 
-        u32 index = HT_NOT_FOUND;
-        u32 index_swap = HT_NOT_FOUND;
+        for (i32 i = 0; i < ht->capacity; i++) {
+                entry = &ht->entry[(slot + i) & (ht->capacity - 1)];
 
-        for (u32 i = 0; i < HT_RSIZE; i++) {
-                index = (natural_slot + i) & (HT_RSIZE - 1);
-                if (ht->entry[index].id == item)
+                if (entry->status == HT_EMPTY)
                         break;
 
-                if (ht->entry[index].status == HT_DELETED) {
-                        if (index_swap == HT_NOT_FOUND)
-                                index_swap = index;
+                if (entry->status == HT_DELETED) {
+                        if (entry_swap == NULL)
+                                entry_swap = entry;
 
                         continue;
                 }
 
-                if (ht->entry[index].status == HT_EMPTY)
-                        break;
+                if (entry->status == HT_OCCUPIED) {
+                        if (entry->key == key)
+                                break;
+                }
         }
 
-        if (index_swap != HT_NOT_FOUND) {
-                ht->entry[index_swap].status = HT_OCCUPIED;
-                ht->entry[index_swap].id = ht->entry[index].id;
-                ht->entry[index_swap].ptr = ht->entry[index].ptr;
+        if (entry_swap && entry->status == HT_OCCUPIED) {
+                *entry_swap = *entry;
+                *entry = (struct ht_entry) {
+                        .status = HT_DELETED,
+                        .key = 0,
+                        .val = 0,
+                };
 
-                ht->entry[index].status = HT_DELETED;
-                ht->entry[index].id = 0;
-                ht->entry[index].ptr = NULL;
-
-                index = index_swap;
+                entry = entry_swap;
         }
 
-        return index;
+        return entry;
 }
 
 
-static void *ht_lookup(struct hash_table *ht, const u32 id)
+static void *ht_find(struct hash_table *ht, const u32 key)
 {
-        const u64 hash = ht_hash(ht, id);
-        const u32 slot = ht_slot(ht, hash, id);
+        u64 hash = 0;
+        if (siphash_hash(ht->siphash, &key, sizeof(u32),
+                         (u8 *) &hash))
+                return HT_ERR;
 
-        if (slot == HT_NOT_FOUND || ht->entry[slot].id != id)
-                return NULL;
+        struct ht_entry *entry = ht_slot(ht, key, hash);
+        if (entry->status == HT_OCCUPIED && entry->key == key)
+                return entry->val;
 
-        return ht->entry[slot].ptr;
+        return NULL;
 }
 
 
-static i32 ht_insert(struct hash_table *ht, const u32 id, void *ptr)
+static i32 ht_insert(struct hash_table *ht, const u32 key, void *val)
 {
-        if (ht->items >= HT_SIZE)
-                return 1;
+        u64 hash = 0;
+        if (siphash_hash(ht->siphash, &key, sizeof(u32),
+                         (u8 *) &hash))
+                return -1;
 
-        const u64 hash = ht_hash(ht, id);
-        const u32 natural_slot = (u32) hash & (HT_RSIZE - 1);
+        const u64 slot = (i32) hash & (ht->capacity - 1);
+        struct ht_entry *entry = NULL;
 
-        for (u32 i = 0; i < HT_RSIZE; i++) {
-                const u32 index = (natural_slot + i) & (HT_RSIZE - 1);
-                if (ht->entry[index].status < HT_OCCUPIED) {
-                        ht->entry[index].status = HT_OCCUPIED;
-                        ht->entry[index].id = id;
-                        ht->entry[index].ptr = ptr;
+        for (i32 i = 0; i < ht->capacity; i++) {
+                entry = &ht->entry[(slot + i) & (ht->capacity - 1)];
+
+                if (entry->status < HT_OCCUPIED) {
+                        *entry = (struct ht_entry) {
+                                .status = HT_OCCUPIED,
+                                .key = key,
+                                .val = val,
+                        };
 
                         ht->items += 1;
-                        return 0;
+                        return (ht->items > (ht->capacity / 2)) ?
+                               ht_rebuild(ht, ht->capacity * 2) : 0;
                 }
-
-                if (ht->entry[index].id == id)
-                        break;
         }
 
         return 1;
 }
 
 
-static void ht_remove(struct hash_table *ht, const u32 id)
+static i32 ht_remove(struct hash_table *ht, const u32 key)
 {
-        assert(ht->items > 0);
+        u64 hash = 0;
+        if (siphash_hash(ht->siphash, &key, sizeof(u32),
+                         (u8 *) &hash))
+                return -1;
 
-        const u64 hash = ht_hash(ht, id);
-        const u32 natural_slot = (u32) hash & (HT_RSIZE - 1);
+        struct ht_entry *entry = ht_slot(ht, key, hash);
+        if (entry->status == HT_OCCUPIED && entry->key == key) {
+                *entry = (struct ht_entry) {
+                        .status = HT_DELETED,
+                        .key = 0,
+                        .val = 0,
+                };
 
-        for (u32 i = 0; i < HT_RSIZE; i++) {
-                const u32 index = (natural_slot + i) & (HT_RSIZE - 1);
-                if (ht->entry[index].id == id) {
-                        ht->entry[index].status = HT_DELETED;
-                        ht->entry[index].id = 0;
-                        ht->entry[index].ptr = NULL;
+                ht->deletions += 1;
+                if (ht->deletions > (ht->capacity / 2))
+                        return ht_rebuild(ht, ht->capacity);
 
-                        ht->items -= 1;
-                        break;
-                }
+                /* noop */
         }
+
+        return 0;
 }
 
 
-static i32 ht_init(struct hash_table *ht,
-                   u8 key[SIPHASH_KEY])
+static bool ht_init(struct hash_table *ht, u8 key[SIPHASH_KEY])
 {
-        return siphash_init(&ht->siphash, key);
+        struct ht_entry *arr = mem_alloc(sizeof(struct ht_entry) * HT_SIZE);
+        if (arr == NULL)
+                return 1;
+
+        if (siphash_init(&ht->siphash, key)) {
+                mem_free(arr);
+                return 1;
+        }
+
+        ht->items = 0;
+        ht->capacity = HT_SIZE;
+        ht->deletions = 0;
+        ht->entry = arr;
+        mem_zero(arr, HT_SIZE);
+
+        return 0;
 }
 
 
 static void ht_teardown(struct hash_table *ht,
                         void (destructor)(void *))
 {
-        for (u32 i = 0; ht->items && i < HT_RSIZE; i++) {
-                if (ht->entry[i].ptr) {
-                        destructor(ht->entry[i].ptr);
+        if (ht->items == 0 || destructor == NULL)
+                goto out;
+
+        for (i32 i = 0; ht->items && i < ht->capacity; i++) {
+                if (ht->entry[i].val) {
                         ht->items -= 1;
+                        destructor(ht->entry[i].val);
                 }
         }
 
-        siphash_free(&ht->siphash);
+        out:
+        {
+                siphash_free(&ht->siphash);
+                mem_free(ht->entry);
+        };
 }
 
 
@@ -2941,8 +3002,11 @@ static i32 local_process_rq(struct nmp_instance *nmp,
         const enum nmp_rq_ops type = request->op;
 
         /* drop, data */
-        if (type < NMP_OP_CONNECT)
-                ctx = ht_lookup(&nmp->sessions, request->session_id);
+        if (type < NMP_OP_CONNECT) {
+                ctx = ht_find(&nmp->sessions, request->session_id);
+                if (ctx == HT_ERR)
+                        return -NMP_ERR_CRYPTO;
+        }
 
         switch (type) {
         case NMP_OP_SEND:
@@ -3294,15 +3358,19 @@ static i32 net_request(struct nmp_instance *nmp,
                        const u32 id, const union nmp_sa *addr,
                        struct nmp_request *request, const u32 len)
 {
-        if (nmp->request_cb == NULL || nmp->sessions.items >= HT_SIZE)
+        if (nmp->request_cb == NULL || nmp->sessions.items >= NMP_SESSIONS_MAX)
                 return 0;
 
         if (len != sizeof(struct nmp_request))
                 return 0;
 
-        struct nmp_session *ctx = ht_lookup(&nmp->sessions, id);
-        if (ctx)
+        struct nmp_session *ctx = ht_find(&nmp->sessions, id);
+        if (ctx) {
+                if (ctx == HT_ERR)
+                        return -NMP_ERR_CRYPTO;
+
                 return net_request_existing(nmp, ctx, request, addr);
+        }
 
         i32 res = 0;
         struct noise_handshake handshake = nmp->noise_precomp;
@@ -3391,10 +3459,12 @@ static i32 net_response(struct nmp_instance *nmp,
         if (amt != sizeof(struct nmp_response))
                 return 0;
 
-
-        struct nmp_session *ctx = ht_lookup(&nmp->sessions, session_id);
+        struct nmp_session *ctx = ht_find(&nmp->sessions, session_id);
         if (ctx == NULL)
                 return 0;
+
+        if (ctx == HT_ERR)
+                return -NMP_ERR_CRYPTO;
 
         if (ctx->state != SESSION_STATUS_RESPONSE) {
                 /* this also protects against duplicate responders */
@@ -3460,9 +3530,14 @@ static void net_collect(struct nmp_instance *nmp,
                 }
         }
 
-        struct nmp_session *ctx = ht_lookup(&nmp->sessions, header.session_id);
+        struct nmp_session *ctx = ht_find(&nmp->sessions, header.session_id);
         if (ctx == NULL)
                 return;
+
+        if (ctx == HT_ERR) {
+                event->err = -NMP_ERR_CRYPTO;
+                return;
+        }
 
         if (ctx->flags & NMP_F_ADDR_VERIFY) {
                 if (mem_cmp(&ctx->addr.sa, event->buf.name, sizeof(union nmp_sa)) != 0)
