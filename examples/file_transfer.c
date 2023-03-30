@@ -107,7 +107,7 @@ i32 handle_request(struct nmp_rq_connect *req,
         str_bin2hex(req->pubkey, 28, key_row1);
         str_bin2hex(req->pubkey + 28, 28, key_row2);
 
-        printf("[peer] session %u; receiving %s from %s\n%s\n%s\n",
+        printf("[peer] session %x; receiving %s from %s\n%s\n%s\n",
                req->id, bytes_str, addr_str, key_row1, key_row2);
 
         ctx->status = FT_RECV;
