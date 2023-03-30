@@ -29,4 +29,6 @@ if (CMAKE_BUILD_TYPE MATCHES Debug)
 
     # disable timers
     #target_compile_definitions(nmp PRIVATE NMP_DEBUG_TIMERS)
+
+    add_subdirectory(examples)
 endif ()
