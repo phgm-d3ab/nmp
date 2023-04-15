@@ -889,18 +889,6 @@ static bool ior_timer_upd(struct ior *ctx, struct ior_timespec *t, void *ref)
 }
 
 
-static bool ior_timer_del(struct ior *ctx, void *ref)
-{
-        ior_sqe *sqe = ior_sqe_get(ctx);
-        if (sqe == NULL)
-                return 1;
-
-        io_uring_prep_timeout_remove(sqe, (u64) ref, 0);
-        io_uring_sqe_set_flags(sqe, IOSQE_CQE_SKIP_SUCCESS);
-        return 0;
-}
-
-
 /*
  *  time
  */
@@ -1173,6 +1161,7 @@ static i32 ht_remove(struct hash_table *ht, const u32 key)
                         .val = 0,
                 };
 
+                ht->items -= 1;
                 ht->deletions += 1;
                 if (ht->deletions > (ht->capacity / 2))
                         return ht_rebuild(ht, ht->capacity);
@@ -1222,7 +1211,7 @@ static void ht_teardown(struct hash_table *ht,
         {
                 siphash_free(&ht->siphash);
                 mem_free(ht->entry);
-        };
+        }
 }
 
 
@@ -1243,7 +1232,7 @@ enum {
         MSG_WINDOW = MSG_MASK_BITS,
         MSG_TXQUEUE = NMP_QUEUELEN, /* @nmp.h */
         MSG_RXQUEUE = MSG_MASK_BITS,
-        MSG_MAX_SINGLE = 1404,
+        MSG_MAX_MSGLEN = 1404,
         MSG_MAX_PAYLOAD = 1408,
 };
 
@@ -1290,7 +1279,7 @@ struct msg_rx_entry {
         enum msg_rx_status status;
         u16 seq;
         u16 len;
-        u8 data[MSG_MAX_SINGLE];
+        u8 data[MSG_MAX_MSGLEN];
 };
 
 
@@ -1870,7 +1859,7 @@ static inline i32 noise_dh(struct blake2b_ctx hash,
         {
                 x448_public_free(&pub);
                 return res;
-        };
+        }
 }
 
 
@@ -2466,7 +2455,7 @@ struct nmp_instance {
 
 
 static_assert((u32) NMP_KEYLEN == (u32) NOISE_DHLEN, "keylen");
-static_assert((u32) NMP_PAYLOAD_MAX == (u32) MSG_MAX_SINGLE, "payload");
+static_assert((u32) NMP_PAYLOAD_MAX == (u32) MSG_MAX_MSGLEN, "payload");
 static_assert(sizeof(struct nmp_init_payload) == NOISE_HANDSHAKE_PAYLOAD, "initiation payload");
 
 
@@ -2989,9 +2978,8 @@ static i32 local_connect(struct nmp_instance *nmp,
 
         out_fail:
         {
-                // todo
                 return res;
-        };
+        }
 }
 
 
@@ -3321,9 +3309,8 @@ static i32 net_request_accept(struct nmp_instance *nmp,
 
         out_fail:
         {
-                // todo
                 return res;
-        };
+        }
 }
 
 

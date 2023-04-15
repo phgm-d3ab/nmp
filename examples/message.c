@@ -51,8 +51,10 @@ i32 handle_request(struct nmp_rq_connect *req,
         (void) (_payload);
         struct msg_state *ctx = state_lock(ctx_ptr);
 
-        if (ctx->status == MSG_ESTAB)
+        if (ctx->status == MSG_ESTAB) {
+                state_unlock(ctx);
                 return NMP_CMD_DROP;
+        }
 
         ctx->status = MSG_ESTAB;
         ctx->id = req->id;
