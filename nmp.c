@@ -1386,7 +1386,7 @@ static bool msg_queue(struct msg_state *ctx, const u8 *msg, const u16 len,
         const u32 index = (ctx->tx_seq + 1) & (MSG_TXQUEUE - 1);
         struct msg_tx_entry *entry = ctx->tx_queue + index;
 
-        if (entry->status > MSG_TX_SENT)
+        if (entry->status != MSG_TX_EMPTY)
                 return 1;
 
         ctx->tx_seq += 1;
