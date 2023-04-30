@@ -1123,7 +1123,7 @@ static i32 ht_insert(struct hash_table *ht, const u32 key, void *val)
                          (u8 *) &hash))
                 return -1;
 
-        const u64 slot = (i32) hash & (ht->capacity - 1);
+        const i32 slot = (i32) hash & (ht->capacity - 1);
         struct ht_entry *entry = NULL;
 
         for (i32 i = 0; i < ht->capacity; i++) {
@@ -1175,7 +1175,8 @@ static i32 ht_remove(struct hash_table *ht, const u32 key)
 
 static bool ht_init(struct hash_table *ht, u8 key[SIPHASH_KEY])
 {
-        struct ht_entry *arr = mem_alloc(sizeof(struct ht_entry) * HT_SIZE);
+        const u32 arrlen = sizeof(struct ht_entry) * HT_SIZE;
+        struct ht_entry *arr = mem_alloc(arrlen);
         if (arr == NULL)
                 return 1;
 
@@ -1188,7 +1189,7 @@ static bool ht_init(struct hash_table *ht, u8 key[SIPHASH_KEY])
         ht->capacity = HT_SIZE;
         ht->deletions = 0;
         ht->entry = arr;
-        mem_zero(arr, HT_SIZE);
+        mem_zero(arr, arrlen);
 
         return 0;
 }
