@@ -3468,10 +3468,11 @@ static i32 net_response(struct nmp_instance *nmp,
         }
 
         i32 res = 0;
-        struct nmp_init_payload reply_pl = {0};
         struct nmp_session_init *ini = ctx->initiation;
+        struct nmp_init_payload reply_pl = {0};
+        struct noise_handshake noise_temp = ini->handshake;
 
-        res = noise_responder_read(&ini->handshake,
+        res = noise_responder_read(&noise_temp,
                                    &response->responder,
                                    &response->header, sizeof(struct nmp_header),
                                    (u8 *) &reply_pl);
@@ -3483,6 +3484,7 @@ static i32 net_response(struct nmp_instance *nmp,
                              ctx->context_ptr);
         switch ((enum nmp_status) res) {
         case NMP_CMD_ACCEPT:
+                ini->handshake = noise_temp;
                 return net_response_accept(nmp, ctx);
 
         case NMP_CMD_DROP:

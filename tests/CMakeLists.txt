@@ -8,6 +8,7 @@ set(ab_tests
         include_lost
         connect_payload
         io_uring_enobufs
+        corrupted_response
         )
 
 set(unit_sets
