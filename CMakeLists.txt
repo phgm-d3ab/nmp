@@ -3,7 +3,7 @@ project(nmp C)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_FLAGS "-Wall -Wextra -Wpedantic -Wframe-larger-than=4096")
-SET(CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS} -g3 -export-dynamic -O0")
+SET(CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS} -g3 -O0")
 SET(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS} -O2")
 set(LIB_TYPE STATIC)
 

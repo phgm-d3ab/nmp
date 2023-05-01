@@ -99,8 +99,8 @@ i32 handle_request(struct nmp_rq_connect *req,
 
         char bytes_str[32] = {0};
         char addr_str[128] = {0};
-        char key_row1[56] = {0};
-        char key_row2[56] = {0};
+        char key_row1[60] = {0};
+        char key_row2[60] = {0};
 
         str_bytes2str(len, bytes_str, sizeof(bytes_str));
         addr_sa2str(&req->addr, addr_str, sizeof(addr_str));

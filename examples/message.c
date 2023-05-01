@@ -64,8 +64,8 @@ i32 handle_request(struct nmp_rq_connect *req,
         addr_sa2str(&req->addr, addr_str, sizeof(addr_str));
 
         char info_msg[512] = {0};
-        char key_row1[56] = {0};
-        char key_row2[56] = {0};
+        char key_row1[60] = {0};
+        char key_row2[60] = {0};
 
         str_bin2hex(req->pubkey, 28, key_row1);
         str_bin2hex(req->pubkey + 28, 28, key_row2);
@@ -105,7 +105,7 @@ i32 handle_status(const enum nmp_status status,
 
         switch (status) {
         case NMP_SESSION_DISCONNECTED:
-                printf("[peer] disconnected (%xu); acked %zu message(s)\n",
+                printf("[peer] disconnected (%x); acked %zu message(s)\n",
                        ctx->id, ctx->counter);
 
                 ctx->status = MSG_IDLE;
@@ -113,12 +113,12 @@ i32 handle_status(const enum nmp_status status,
                 break;
 
         case NMP_SESSION_RESPONSE:
-                printf("[peer] connection established (%xu)\n", ctx->id);
+                printf("[peer] connection established (%x)\n", ctx->id);
                 res = NMP_CMD_ACCEPT;
                 break;
 
         case NMP_SESSION_INCOMING:
-                printf("[peer] connected (%xu)\n", ctx->id);
+                printf("[peer] connected (%x)\n", ctx->id);
                 break;
 
         default:

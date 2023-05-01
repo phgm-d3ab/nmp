@@ -52,7 +52,7 @@ int alice_status(enum nmp_status status, const union nmp_cb_status *cb, void *dr
 }
 
 
-void bob_data(const u8 *data, const u16 len, void *drv)
+void bob_data(const u8 *data, const u32 len, void *drv)
 {
         if (len != 11)
                 test_fail();

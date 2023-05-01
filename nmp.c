@@ -1137,8 +1137,10 @@ static i32 ht_insert(struct hash_table *ht, const u32 key, void *val)
                         };
 
                         ht->items += 1;
-                        return (ht->items > (ht->capacity / 2)) ?
-                               ht_rebuild(ht, ht->capacity * 2) : 0;
+                        if (ht->items > (ht->capacity / 2))
+                                return ht_rebuild(ht, ht->capacity * 2);
+
+                        return 0;
                 }
         }
 
@@ -1285,8 +1287,8 @@ struct msg_rx_entry {
 
 
 struct msg_cbs {
-        void (*data)(const u8 *, u32, void *);
-        void (*data_noack)(const u8 *, u32, void *);
+        void (*data)(const u8[MSG_MAX_MSGLEN], u32, void *);
+        void (*data_noack)(const u8[MSG_MAX_MSGLEN], u32, void *);
         void (*ack)(u64, void *);
 };
 
@@ -1612,11 +1614,12 @@ static void msg_ack_assemble(const struct msg_state *ctx, struct msg_ack *ack)
                 shift += 1;
         }
 
-        ack->ack = u16le_set(seq_hi);
-        ack->pad[0] = 0;
-        ack->pad[1] = 0;
-        ack->pad[2] = 0;
-        ack->ack_mask = u64le_set(mask);
+
+        *ack = (struct msg_ack) {
+                .ack = u16le_set(seq_hi),
+                .pad = {0, 0, 0},
+                .ack_mask = u64le_set(mask),
+        };
 }
 
 
@@ -1716,7 +1719,7 @@ enum {
         NOISE_HASHLEN = BLAKE2B_HASHLEN,
         NOISE_DHLEN = X448_KEYLEN,
         NOISE_AEAD_MAC = CHACHA20POLY1305_TAGLEN,
-        NOISE_HANDSHAKE_PAYLOAD = 128,
+        NOISE_HANDSHAKE_PAYLOAD = 256,
         NOISE_COUNTER_WINDOW = 224,
 };
 
@@ -4055,7 +4058,7 @@ static i32 run_process_batch(struct nmp_instance *nmp,
         u32 cqes = 0;
         i32 items = 0;
 
-        ior_for_each_cqe(&nmp->io.ring, head, cqe) {
+                ior_for_each_cqe(&nmp->io.ring, head, cqe) {
                 struct nmp_event event = {0};
 
                 switch (ior_cqe_kind(&nmp->io, cqe)) {

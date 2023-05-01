@@ -224,7 +224,7 @@ int bob_status(enum nmp_status s,
 }
 
 
-void alice_data(const u8 *data, const u16 len, void *drv)
+void alice_data(const u8 *data, const u32 len, void *drv)
 {
         if (len != sizeof(struct message))
                 test_panic();

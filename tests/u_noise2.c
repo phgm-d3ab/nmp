@@ -26,6 +26,93 @@ static struct noise_handshake base_state(struct rnd_pool *rnd)
 }
 
 
+void damage_initiator(const struct noise_handshake *ctx,
+                      const u8 *header,
+                      const struct noise_initiator *initiator)
+{
+        u8 _payload[NOISE_HANDSHAKE_PAYLOAD] = {0};
+        struct {
+                u8 header[sizeof(struct nmp_header)];
+                struct noise_initiator initiator;
+
+        } msg;
+
+        memcpy(msg.header, header, sizeof(msg.header));
+        memcpy(&msg.initiator, initiator, sizeof(struct noise_initiator));
+        u8 *ptr = (u8 *) &msg;
+
+        for (u32 i = 0; i < (sizeof(struct nmp_request) * 8); i++) {
+                struct noise_handshake temp = *ctx;
+                ptr[(i / 8) % sizeof(msg)] ^= (1u << (i & 7));
+
+                i32 res = noise_initiator_read(&temp, &msg.initiator,
+                                               msg.header, sizeof(msg.header),
+                                               _payload);
+                if (res == 0)
+                        test_panic();
+
+                ptr[(i / 8) % sizeof(msg)] ^= (1u << (i & 7));
+        }
+}
+
+
+void damage_responder(const struct noise_handshake *ctx,
+                      const u8 *header,
+                      const struct noise_responder *responder)
+{
+        u8 _payload[NOISE_HANDSHAKE_PAYLOAD] = {0};
+        struct {
+                u8 header[sizeof(struct nmp_header)];
+                struct noise_responder responder;
+
+        } msg;
+
+        memcpy(msg.header, header, sizeof(struct nmp_header));
+        memcpy(&msg.responder, responder, sizeof(struct noise_responder));
+        u8 *ptr = (u8 *) &msg;
+
+        for (u32 i = 0; i < (sizeof(struct nmp_response) * 8); i++) {
+                struct noise_handshake temp = *ctx;
+                ptr[(i / 8) % sizeof(msg)] ^= (1u << (i & 7));
+
+                i32 res = noise_responder_read(&temp, &msg.responder,
+                                               msg.header, sizeof(msg.header),
+                                               _payload);
+                if (res == 0)
+                        test_panic();
+
+                ptr[(i / 8) % sizeof(msg)] ^= (1u << (i & 7));
+        }
+}
+
+
+int split(struct noise_handshake *alice,
+          struct noise_handshake *bob)
+{
+        u8 alice_temp_k1[NOISE_HASHLEN] = {0};
+        u8 alice_temp_k2[NOISE_HASHLEN] = {0};
+        if (noise_hkdf(&alice->hmac, alice->symmetric_ck,
+                       NULL, 0,
+                       alice_temp_k1, alice_temp_k2))
+                test_panic();
+
+        u8 bob_temp_k1[NOISE_HASHLEN] = {0};
+        u8 bob_temp_k2[NOISE_HASHLEN] = {0};
+        if (noise_hkdf(&bob->hmac, bob->symmetric_ck,
+                       NULL, 0,
+                       bob_temp_k1, bob_temp_k2))
+                test_panic();
+
+        if (memcmp(alice_temp_k1, bob_temp_k1, NOISE_HASHLEN) != 0)
+                return 1;
+
+        if (memcmp(alice_temp_k2, bob_temp_k2, NOISE_HASHLEN) != 0)
+                return 1;
+
+        return 0;
+}
+
+
 int main(void)
 {
         u8 payload[NOISE_HANDSHAKE_PAYLOAD] = {0};
@@ -69,29 +156,7 @@ int main(void)
                                   header1, sizeof(header1), payload))
                 test_panic();
 
-
-        for (u32 i = 0; i < (sizeof(struct nmp_request) * 8); i++) {
-                struct noise_handshake bob_temp = bob;
-                u8 _payload[NOISE_HANDSHAKE_PAYLOAD] = {0};
-
-                struct {
-                        u8 header[sizeof(header1)];
-                        struct noise_initiator initiator;
-
-                } msg;
-
-                memcpy(msg.header, header1, sizeof(header1));
-                memcpy(&msg.initiator, &initiator, sizeof(initiator));
-
-                u8 *ptr = (u8 *) &msg;
-                ptr[(i / 8) % sizeof(msg)] ^= (1u << (i & 7));
-
-                i32 res = noise_initiator_read(&bob_temp, &msg.initiator,
-                                               msg.header, sizeof(msg.header),
-                                               _payload);
-                if (res == 0)
-                        test_panic();
-        }
+        damage_initiator(&bob, header1, &initiator);
 
 
         u8 bob_payload[NOISE_HANDSHAKE_PAYLOAD] = {0};
@@ -105,29 +170,7 @@ int main(void)
                 test_panic();
 
 
-        for (u32 i = 0; i < (sizeof(struct nmp_response) * 8); i++) {
-                struct noise_handshake alice_temp = alice;
-                u8 _payload[NOISE_HANDSHAKE_PAYLOAD] = {0};
-
-                struct {
-                        u8 header[sizeof(header2)];
-                        struct noise_responder responder;
-
-                } msg;
-
-                memcpy(msg.header, header2, sizeof(header2));
-                memcpy(&msg.responder, &responder, sizeof(responder));
-
-                u8 *ptr = (u8 *) &msg;
-                ptr[(i / 8) % sizeof(msg)] ^= (1u << (i & 7));
-
-                i32 res = noise_responder_read(&alice_temp, &msg.responder,
-                                               msg.header, sizeof(msg.header),
-                                               _payload);
-                if (res == 0)
-                        test_panic();
-        }
-
+        damage_responder(&alice, header2, &responder);
 
         u8 alice_payload[NOISE_HANDSHAKE_PAYLOAD] = {0};
         if (noise_responder_read(&alice, &responder,
@@ -135,24 +178,5 @@ int main(void)
                 test_panic();
 
 
-        /* noise_split() */
-        u8 alice_temp_k1[NOISE_HASHLEN] = {0};
-        u8 alice_temp_k2[NOISE_HASHLEN] = {0};
-        if (noise_hkdf(&alice.hmac, alice.symmetric_ck,
-                       NULL, 0,
-                       alice_temp_k1, alice_temp_k2))
-                test_panic();
-
-        u8 bob_temp_k1[NOISE_HASHLEN] = {0};
-        u8 bob_temp_k2[NOISE_HASHLEN] = {0};
-        if (noise_hkdf(&bob.hmac, bob.symmetric_ck,
-                       NULL, 0,
-                       bob_temp_k1, bob_temp_k2))
-                test_panic();
-
-        if (memcmp(alice_temp_k1, bob_temp_k1, NOISE_HASHLEN) != 0)
-                return 1;
-
-        if (memcmp(alice_temp_k2, bob_temp_k2, NOISE_HASHLEN) != 0)
-                return 1;
+        return split(&alice, &bob);
 }

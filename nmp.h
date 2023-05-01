@@ -51,7 +51,7 @@ enum {
         NMP_PAYLOAD_MAX = 1404,
 
         /* maximum size of application defined payload included with requests and responses */
-        NMP_INITIATION_PAYLOAD = 96,
+        NMP_INITIATION_PAYLOAD = 224,
 
         /* maximum amount of ops nmp_submit() can read per call */
         NMP_RQ_BATCH = 32,

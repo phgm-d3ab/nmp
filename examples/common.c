@@ -26,8 +26,6 @@ void str_bin2hex(const u8 *in, const i32 len, char *out)
                 out[(u32) (i * 2)] = hex[in[i] >> 4];
                 out[(u32) ((i * 2) + 1)] = hex[in[i] & 0xf];
         }
-
-        out[(u32) (len * 2)] = 0;
 }
 
 
@@ -268,8 +266,8 @@ i32 key_generate(u8 *out)
 void conf_info(const struct nmp_conf *conf)
 {
         char addr_str[128] = {0};
-        char key_row1[56] = {0};
-        char key_row2[56] = {0};
+        char key_row1[60] = {0};
+        char key_row2[60] = {0};
 
         addr_sa2str(&conf->addr, addr_str, sizeof(addr_str));
         str_bin2hex(conf->pubkey, 28, key_row1);
