@@ -445,8 +445,6 @@ enum {
 
 
 enum {
-        IOR_UDP_MAX = 1440,
-        IOR_UDP_MIN = 32,
         IOR_UDP_PBUFSIZE = 2048,
         IOR_SOCPAIR_PBUFSIZE = 768,
 };
@@ -619,11 +617,6 @@ static bool ior_udp_pbuf_get(struct ior *ctx, const ior_cqe *cqe,
         out->data_len = io_uring_recvmsg_payload_length(
                 o, cqe->res, &ctx->udp_hdr);
         out->name = io_uring_recvmsg_name(o);
-
-        if (out->data_len < IOR_UDP_MIN || out->data_len > IOR_UDP_MAX) {
-                out->data = NULL;
-                return 0;
-        }
 
         return 0;
 }
@@ -807,7 +800,7 @@ struct ior_udp_send_buf {
         ior_addr addr;
         struct msghdr hdr;
         struct iovec iov;
-        u8 data[IOR_UDP_MAX];
+        u8 data[IOR_UDP_PBUFSIZE - sizeof(struct sockaddr_storage)];
 };
 
 
@@ -2264,8 +2257,8 @@ static i32 noise_counter_validate(const u32 block[8],
 
 
 struct nmp_header {
-        u8 type;
         u8 pad[3];
+        u8 type;
         u32 session_id;
 };
 
@@ -2344,6 +2337,12 @@ enum packet_types {
         NMP_RESPONSE = 1,
         NMP_DATA = 2,
         NMP_ACK = 3,
+};
+
+
+enum packet_sizes {
+        NMP_PKT_MIN = (sizeof(struct nmp_transport) + NOISE_AEAD_MAC),
+        NMP_PKT_MAX = (sizeof(struct nmp_transport) + MSG_MAX_PAYLOAD + NOISE_AEAD_MAC),
 };
 
 
@@ -2434,6 +2433,9 @@ struct nmp_instance {
         u32 options;
         sa_family_t sa_family;
         struct ior_timespec its;
+
+        void *socket_ctx;
+        void (*socket_data)(const u8 *, const u32, void *);
 
         void *request_ctx;
         int (*request_cb)(struct nmp_rq_connect *, const u8 *, void *);
@@ -3345,23 +3347,15 @@ static i32 net_request_respond(struct nmp_instance *nmp,
 }
 
 
-static i32 net_request(struct nmp_instance *nmp,
-                       const u32 id, const union nmp_sa *addr,
-                       struct nmp_request *request, const u32 len)
+static i32 net_request(struct nmp_instance *nmp, struct nmp_session *ctx,
+                       const union nmp_sa *addr,
+                       struct nmp_request *request)
 {
         if (nmp->request_cb == NULL || nmp->sessions.items >= NMP_SESSIONS_MAX)
                 return 0;
 
-        if (len != sizeof(struct nmp_request))
-                return 0;
-
-        struct nmp_session *ctx = ht_find(&nmp->sessions, id);
-        if (ctx) {
-                if (ctx == HT_ERR)
-                        return -NMP_ERR_CRYPTO;
-
+        if (ctx)
                 return net_request_existing(nmp, ctx, request, addr);
-        }
 
         i32 res = 0;
         struct noise_handshake handshake = nmp->noise_precomp;
@@ -3382,7 +3376,7 @@ static i32 net_request(struct nmp_instance *nmp,
                 return 0;
 
         request_cb.addr = *addr;
-        request_cb.id = id;
+        request_cb.id = request->header.session_id;
         mem_copy(request_cb.pubkey, handshake.rs, NOISE_DHLEN);
 
         /* ask application what we do next */
@@ -3440,22 +3434,15 @@ static i32 net_response_accept(struct nmp_instance *nmp,
 }
 
 
-static i32 net_response(struct nmp_instance *nmp,
-                        const u32 session_id, const union nmp_sa *addr,
-                        struct nmp_response *response, const u32 amt)
+static i32 net_response(struct nmp_instance *nmp, struct nmp_session *ctx,
+                        const union nmp_sa *addr,
+                        struct nmp_response *response)
 {
         if (nmp->status_cb == NULL)
                 return 0;
 
-        if (amt != sizeof(struct nmp_response))
-                return 0;
-
-        struct nmp_session *ctx = ht_find(&nmp->sessions, session_id);
         if (ctx == NULL)
                 return 0;
-
-        if (ctx == HT_ERR)
-                return -NMP_ERR_CRYPTO;
 
         if (ctx->state != SESSION_STATUS_RESPONSE) {
                 /* this also protects against duplicate responders */
@@ -3498,47 +3485,89 @@ static i32 net_response(struct nmp_instance *nmp,
 }
 
 
-static void net_collect(struct nmp_instance *nmp,
-                        struct nmp_event *event)
+static bool net_packet_validate(const void *pkt, const u32 len,
+                                struct nmp_header *out)
 {
-        const struct nmp_header header = *((struct nmp_header *) event->buf.data);
-        if (header.type & 0xfc /* 0b11111100 */
-            || (header.pad[0] | header.pad[1] | header.pad[2]))
+        if (len < NMP_PKT_MIN || len > NMP_PKT_MAX)
+                return 1;
+
+        const struct nmp_header *hdr = pkt;
+        if (hdr->pad[0] | hdr->pad[1] | hdr->pad[2])
+                return 1;
+
+        if (hdr->type >> 2)
+                return 1;
+
+        bool res = 0;
+        if (hdr->type > NMP_RESPONSE) {
+                res = !(len & 15);
+        } else {
+                const u32 sz[2] = {
+                        sizeof(struct nmp_request),
+                        sizeof(struct nmp_response),
+                };
+
+                res = (len == sz[hdr->type]);
+        }
+
+        if (!res)
+                return 1;
+
+        if (hdr->session_id == 0)
+                return 1;
+
+        *out = (struct nmp_header) {
+                .type = hdr->type,
+                .session_id = hdr->session_id,
+        };
+
+        return 0;
+}
+
+
+static void net_packet_read(struct nmp_instance *nmp,
+                            struct nmp_event *event)
+{
+        struct nmp_header header = {0};
+        if (net_packet_validate(event->buf.data, event->buf.data_len,
+                                &header)) {
+                if (nmp->socket_data)
+                        nmp->socket_data(event->buf.data,
+                                         event->buf.data_len,
+                                         nmp->socket_ctx);
                 return;
-
-        if (header.session_id == 0)
-                return;
-
-        if (header.type < NMP_DATA) {
-                switch (header.type) {
-                case NMP_REQUEST:
-                        event->err = net_request(nmp, header.session_id, event->buf.name,
-                                                 event->buf.data, event->buf.data_len);
-                        return;
-
-                case NMP_RESPONSE:
-                        event->err = net_response(nmp, header.session_id, event->buf.name,
-                                                  event->buf.data, event->buf.data_len);
-                        return;
-                }
         }
 
         struct nmp_session *ctx = ht_find(&nmp->sessions, header.session_id);
-        if (ctx == NULL)
-                return;
-
         if (ctx == HT_ERR) {
                 event->err = -NMP_ERR_CRYPTO;
                 return;
         }
+
+        switch (header.type) {
+        case NMP_REQUEST:
+                event->err = net_request(nmp, ctx, event->buf.name,
+                                         event->buf.data);
+                return;
+
+        case NMP_RESPONSE:
+                event->err = net_response(nmp, ctx, event->buf.name,
+                                          event->buf.data);
+                return;
+
+        default:
+                break;
+        }
+
+
+        if (ctx == NULL)
+                return;
 
         if (ctx->flags & NMP_F_ADDR_VERIFY) {
                 if (mem_cmp(&ctx->addr.sa, event->buf.name, sizeof(union nmp_sa)) != 0)
                         return;
         }
 
-        if (event->buf.data_len % 16)
-                return;
 
         u8 payload[MSG_MAX_PAYLOAD];
         i32 payload_msgs = 0;
@@ -3568,6 +3597,9 @@ static void net_collect(struct nmp_instance *nmp,
 
                 ctx->events |= SESSION_EVENT_ACK;
                 break;
+
+        default:
+                break;
         }
 
         /* if there are new events && not queued yet */
@@ -3596,7 +3628,7 @@ static void event_net(struct nmp_instance *nmp,
         }
 
         if (event->buf.data)
-                net_collect(nmp, event);
+                net_packet_read(nmp, event);
 
         ior_udp_pbuf_reuse(&nmp->io, event->buf.pbuf, event->buf.bid);
 }
@@ -3635,6 +3667,9 @@ static i32 new_base(struct nmp_instance *nmp, struct nmp_conf *conf)
                 return -NMP_ERR_INVAL;
 
         nmp->sa_family = sa_family;
+
+        nmp->socket_ctx = conf->socket_ctx;
+        nmp->socket_data = conf->socket_data;
 
         nmp->request_ctx = conf->request_ctx;
         nmp->request_cb = conf->request_cb;
@@ -3677,6 +3712,7 @@ static i32 new_ior(struct nmp_instance *nmp, struct nmp_conf *conf)
                 return -NMP_ERR_IORING;
 
         nmp->local_tx = sp[1];
+        conf->socket = udp;
         return 0;
 }
 
@@ -4060,7 +4096,7 @@ static i32 run_process_batch(struct nmp_instance *nmp,
         u32 cqes = 0;
         i32 items = 0;
 
-                ior_for_each_cqe(&nmp->io.ring, head, cqe) {
+        ior_for_each_cqe(&nmp->io.ring, head, cqe) {
                 struct nmp_event event = {0};
 
                 switch (ior_cqe_kind(&nmp->io, cqe)) {

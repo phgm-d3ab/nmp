@@ -255,17 +255,21 @@ struct nmp_conf {
         /* mask for options */
         uint32_t options;
 
+        /*
+         * udp socket created for use with new instance will be available here
+         * after nmp_new() returns; if set, library will call application defined
+         * socket_data() with its context pointer when received packet was not recognized.
+         */
+        int socket;
+        void *socket_ctx;
+        void (*socket_data)(const uint8_t *data,
+                            const uint32_t len,
+                            void *soc_ctx);
 
         /*
-         * this pointer is passed to request_cb so that application
-         * can have its context for processing connection requests
+         *
          */
         void *request_ctx;
-
-        /*
-         * incoming request has arrived: make a decision, optionally populate
-         * response_payload member and return one of NMP_CMD_* values
-         */
         int (*request_cb)(struct nmp_rq_connect *request,
                           const uint8_t request_payload[NMP_INITIATION_PAYLOAD],
                           void *request_ctx);

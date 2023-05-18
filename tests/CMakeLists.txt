@@ -16,6 +16,7 @@ set(unit_sets
         u_noise
         u_noise2
         u_hashtable
+        u_pktval
         )
 
 
