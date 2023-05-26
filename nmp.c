@@ -2435,7 +2435,8 @@ struct nmp_instance {
         struct ior_timespec its;
 
         void *socket_ctx;
-        void (*socket_data)(const u8 *, const u32, void *);
+        void (*socket_data)(const u8 *, const u32,
+                            const union nmp_sa *, void *);
 
         void *request_ctx;
         int (*request_cb)(struct nmp_rq_connect *, const u8 *, void *);
@@ -3532,9 +3533,8 @@ static void net_packet_read(struct nmp_instance *nmp,
         if (net_packet_validate(event->buf.data, event->buf.data_len,
                                 &header)) {
                 if (nmp->socket_data)
-                        nmp->socket_data(event->buf.data,
-                                         event->buf.data_len,
-                                         nmp->socket_ctx);
+                        nmp->socket_data(event->buf.data, event->buf.data_len,
+                                         event->buf.name, nmp->socket_ctx);
                 return;
         }
 

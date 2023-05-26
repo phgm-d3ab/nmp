@@ -262,9 +262,8 @@ struct nmp_conf {
          */
         int socket;
         void *socket_ctx;
-        void (*socket_data)(const uint8_t *data,
-                            const uint32_t len,
-                            void *soc_ctx);
+        void (*socket_data)(const uint8_t *data, const uint32_t len,
+                            const union nmp_sa *addr, void *soc_ctx);
 
         /*
          *
